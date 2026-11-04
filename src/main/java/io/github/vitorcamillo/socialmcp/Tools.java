@@ -609,6 +609,12 @@ public class Tools {
         return true;
     }
 
+    /** O clique ja ocorreu: foco errado nao prova ausencia de efeito publico. */
+    static RuntimeException falhaFocoAposClique(String sel) {
+        return new IllegalStateException("type: depois do clique o foco nao esta em '" + sel
+                + "'; nada foi digitado, mas o clique pode ter tido efeito (tentativa registrada)");
+    }
+
     static final String CONF_ABORTADO_APOS_PUBLICO = "abortado_apos_publico";
     static final String CONF_NADA_PUBLICO = "nenhum_passo_publico_feito";
 
@@ -748,7 +754,7 @@ public class Tools {
                     d.sleep(0.8);
                     // nunca digitar no foco errado (clique caiu num overlay e o foco ficou em outro lugar)
                     if (!RealClick.focused(campo)) {
-                        throw new RealClick.NaoAgiu("type: depois do clique o foco nao esta em '" + sel + "'; nada foi digitado");
+                        throw falhaFocoAposClique(sel);
                     }
                 }
                 String text = a.path("text").asText();

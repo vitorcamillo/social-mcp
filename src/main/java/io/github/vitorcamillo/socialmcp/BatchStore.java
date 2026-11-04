@@ -1347,27 +1347,30 @@ public class BatchStore {
      * qualquer passo. Confere de novo o hash no arquivo reservado. Retorna o lote reservado.
      */
     public JsonNode claim(String id, JsonNode validado) throws IOException {
-        Path approved = store.batchesDir().resolve(id + ".approved.json");
-        Path run = running(id);
-        if (Files.exists(run)) {
-            throw new IllegalStateException("lote " + id + " ja esta em execucao em outro processo");
+        try (Store.Trava ignored = store.tryLock(loteLock(id))) {
+            if (ignored == null) throw new IllegalStateException("lote " + id + " em transicao; tente novamente");
+            Path approved = store.batchesDir().resolve(id + ".approved.json");
+            Path run = running(id);
+            if (Files.exists(run)) {
+                throw new IllegalStateException("lote " + id + " ja esta em execucao em outro processo");
+            }
+            try {
+                Files.move(approved, run, StandardCopyOption.ATOMIC_MOVE);
+            } catch (java.nio.file.NoSuchFileException e) {
+                throw new IllegalStateException("lote " + id + " deixou de estar aprovado (executado, revogado ou reservado por outro processo)");
+            }
+            JsonNode b = Json.parse(Files.readString(run, StandardCharsets.UTF_8));
+            String hash = b.path("actionsHash").asText("");
+            if (hash.isBlank() || !hash.equals(validado.path("actionsHash").asText(""))
+                    || !hash.equals(TextGate.hashActions(b.path("actions")))) {
+                recusar(id, b.path("network").asText(null), "hash_divergente");
+                atomicMove(run, store.batchesDir().resolve(id + ".approved.json"));
+                throw new IllegalStateException("lote " + id + " mudou entre a conferencia e a reserva; rejeite e reaprove");
+            }
+            store.appendJournal("batch_claimed", b.path("network").asText(null), Json.obj().put("batchId", id)
+                    .put("pid", ProcessHandle.current().pid()));
+            return b;
         }
-        try {
-            Files.move(approved, run, StandardCopyOption.ATOMIC_MOVE);
-        } catch (java.nio.file.NoSuchFileException e) {
-            throw new IllegalStateException("lote " + id + " deixou de estar aprovado (executado, revogado ou reservado por outro processo)");
-        }
-        JsonNode b = Json.parse(Files.readString(run, StandardCharsets.UTF_8));
-        String hash = b.path("actionsHash").asText("");
-        if (hash.isBlank() || !hash.equals(validado.path("actionsHash").asText(""))
-                || !hash.equals(TextGate.hashActions(b.path("actions")))) {
-            recusar(id, b.path("network").asText(null), "hash_divergente");
-            atomicMove(run, store.batchesDir().resolve(id + ".approved.json"));
-            throw new IllegalStateException("lote " + id + " mudou entre a conferencia e a reserva; rejeite e reaprove");
-        }
-        store.appendJournal("batch_claimed", b.path("network").asText(null), Json.obj().put("batchId", id)
-                .put("pid", ProcessHandle.current().pid()));
-        return b;
     }
 
     /** Copias de midia aprovadas (batches/) do lote; so caminhos dentro de batches/. */

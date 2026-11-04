@@ -45,20 +45,16 @@ public class Store {
             Files.createDirectories(this.home);
             Files.createDirectories(this.home.resolve("batches"));
             Files.createDirectories(this.home.resolve("screenshots"));
-            if (!Files.exists(configPath())) {
-                Files.writeString(configPath(), DEFAULT_CONFIG, StandardCharsets.UTF_8);
-            }
-            if (!Files.exists(healthPath())) {
-                // criacao sem sobrescrever: dois processos iniciando no mesmo home novo nao
-                // podem apagar com "{}" um estado que o outro ja gravou (pausas/cooldowns)
-                try {
-                    Files.writeString(healthPath(), "{}\n", StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW);
-                } catch (java.nio.file.FileAlreadyExistsException ignored) {
-                    // outro processo criou o health.json primeiro
+            try (Trava ignored = lock("health")) {
+                if (!Files.exists(configPath())) {
+                    Files.writeString(configPath(), DEFAULT_CONFIG, StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW);
                 }
-            }
-            if (!Files.exists(journalPath())) {
-                Files.createFile(journalPath());
+                if (!Files.exists(healthPath())) {
+                    Files.writeString(healthPath(), "{}\n", StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW);
+                }
+                if (!Files.exists(journalPath())) {
+                    Files.createFile(journalPath());
+                }
             }
         } catch (IOException e) {
             throw new RuntimeException("Falha ao preparar diretorio de dados " + this.home + ": " + e.getMessage(), e);
@@ -300,14 +296,34 @@ public class Store {
 
     // ---------- travas entre processos ----------
 
-    /** Trava exclusiva de arquivo (locks/&lt;nome&gt;.lock); vale entre processos do MCP e a CLI. */
+    /**
+     * FileLock vale pela JVM inteira (outra thread da mesma JVM recebe
+     * OverlappingFileLockException em vez de esperar): o semaforo por trava completa isso.
+     */
+    private static final java.util.Map<String, Fila> SEMAFOROS = new java.util.HashMap<>();
+
+    private static final class Fila extends java.util.concurrent.Semaphore {
+        int usuarios;
+        Fila() { super(1); }
+    }
+
+    private static synchronized void soltarReferencia(String chave) {
+        Fila fila = SEMAFOROS.get(chave);
+        if (--fila.usuarios == 0) SEMAFOROS.remove(chave);
+    }
+
+    /** Trava exclusiva de arquivo (locks/&lt;nome&gt;.lock); vale entre processos do MCP, a CLI e threads da JVM. */
     public static final class Trava implements AutoCloseable {
         private final FileChannel ch;
         private final FileLock lock;
+        private final java.util.concurrent.Semaphore fila;
+        private final String chave;
 
-        private Trava(FileChannel ch, FileLock lock) {
+        private Trava(FileChannel ch, FileLock lock, java.util.concurrent.Semaphore fila, String chave) {
             this.ch = ch;
             this.lock = lock;
+            this.fila = fila;
+            this.chave = chave;
         }
 
         @Override
@@ -315,7 +331,12 @@ public class Store {
             try {
                 lock.release();
             } finally {
-                ch.close();
+                try {
+                    ch.close();
+                } finally {
+                    fila.release();
+                    soltarReferencia(chave);
+                }
             }
         }
     }
@@ -326,33 +347,92 @@ public class Store {
         return FileChannel.open(locksDir().resolve(nome + ".lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
     }
 
-    /** Trava bloqueante (espera o outro processo soltar). */
+    private java.util.concurrent.Semaphore semaforoDe(String nome) throws IOException {
+        if (!nome.matches("[A-Za-z0-9_.-]+")) throw new IllegalArgumentException("nome de trava invalido: " + nome);
+        synchronized (Store.class) {
+            Fila fila = SEMAFOROS.computeIfAbsent(chaveDaTrava(nome), k -> new Fila());
+            fila.usuarios++;
+            return fila;
+        }
+    }
+
+    private String chaveDaTrava(String nome) throws IOException {
+        // Caminho real evita duas filas da JVM para o mesmo home acessado por symlink.
+        return home.toRealPath().resolve("locks").resolve(nome + ".lock").toString();
+    }
+
+    /** Trava bloqueante (espera o outro processo — ou outra thread desta JVM — soltar). */
     public Trava lock(String nome) throws IOException {
-        FileChannel ch = lockChannel(nome);
+        String chave = chaveDaTrava(nome);
+        java.util.concurrent.Semaphore fila = semaforoDe(nome);
         try {
-            return new Trava(ch, ch.lock());
+            fila.acquire();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            soltarReferencia(chave);
+            throw new IOException("interrompido esperando a trava " + nome, e);
+        }
+        FileChannel ch;
+        try {
+            ch = lockChannel(nome);
         } catch (IOException | RuntimeException e) {
-            ch.close();
+            fila.release();
+            soltarReferencia(chave);
+            throw e;
+        }
+        try {
+            return new Trava(ch, ch.lock(), fila, chave);
+        } catch (IOException | RuntimeException e) {
+            fechaCanal(ch);
+            fila.release();
+            soltarReferencia(chave);
             throw e;
         }
     }
 
     /** Trava sem espera: null se outro processo (ou esta JVM) ja a segura. */
     public Trava tryLock(String nome) throws IOException {
-        FileChannel ch = lockChannel(nome);
+        String chave = chaveDaTrava(nome);
+        java.util.concurrent.Semaphore fila = semaforoDe(nome);
+        if (!fila.tryAcquire()) {
+            soltarReferencia(chave);
+            return null;
+        }
+        FileChannel ch;
+        try {
+            ch = lockChannel(nome);
+        } catch (IOException | RuntimeException e) {
+            fila.release();
+            soltarReferencia(chave);
+            throw e;
+        }
         try {
             FileLock l = ch.tryLock();
             if (l == null) {
-                ch.close();
+                fechaCanal(ch);
+                fila.release();
+                soltarReferencia(chave);
                 return null;
             }
-            return new Trava(ch, l);
+            return new Trava(ch, l, fila, chave);
         } catch (OverlappingFileLockException e) {
-            ch.close();
+            fechaCanal(ch);
+            fila.release();
+            soltarReferencia(chave);
             return null;
         } catch (IOException | RuntimeException e) {
-            ch.close();
+            fechaCanal(ch);
+            fila.release();
+            soltarReferencia(chave);
             throw e;
+        }
+    }
+
+    private static void fechaCanal(FileChannel ch) {
+        try {
+            ch.close();
+        } catch (IOException ignored) {
+            // a trava sera recriada no proximo uso
         }
     }
 

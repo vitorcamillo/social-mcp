@@ -24,6 +24,13 @@ class ExecucaoConcorrenteTest {
     @TempDir
     Path tmp;
 
+    @org.junit.jupiter.api.AfterEach
+    void nenhumaFilaFicaRetidaDepoisDoTeste() throws Exception {
+        var campo = Store.class.getDeclaredField("SEMAFOROS");
+        campo.setAccessible(true);
+        assertTrue(((java.util.Map<?, ?>) campo.get(null)).isEmpty(), "fila retida sem usuario");
+    }
+
     private Store store() throws Exception {
         return TextGateTest.storeComGate(tmp, "exit 0", 30);
     }
@@ -703,5 +710,172 @@ class ExecucaoConcorrenteTest {
 
         // corpo truncado no meio da lista: redige ate o fim
         assertFalse(Tools.redigir("{\"tokens\":[\"segredo-cortado").contains("segredo-cortado"));
+    }
+    /**
+     * A inicializacao espera a trava de health.json: um estado gravado por outro processo
+     * enquanto esta JVM inicializa nao e sobrescrito por {}.
+     */
+    @Test
+    void inicializacaoDeStoreEsperaATravaDaSaude() throws Exception {
+        Store s = store();
+        Files.delete(s.healthPath());
+        CountDownLatch travado = new CountDownLatch(1);
+        CountDownLatch liberar = new CountDownLatch(1);
+        AtomicReference<Throwable> erro = new AtomicReference<>();
+        Thread escritor = new Thread(() -> {
+            try (Store.Trava t = s.lock("health")) {
+                travado.countDown();
+                liberar.await(10, TimeUnit.SECONDS);
+                // estado gravado por outro processo enquanto este inicializa
+                Files.writeString(s.healthPath(), "{\"bluesky\":{\"state\":\"cooldown\",\"reason\":\"anti-bot\"}}\n",
+                        StandardCharsets.UTF_8);
+            } catch (Throwable e) {
+                travado.countDown();
+                erro.set(e);
+            }
+        });
+        escritor.start();
+        assertTrue(travado.await(5, TimeUnit.SECONDS));
+        AtomicReference<Store> nova = new AtomicReference<>();
+        Thread init = new Thread(() -> nova.set(new Store(s.home)));
+        init.start();
+        init.join(1000);
+        assertTrue(init.isAlive(), "a inicializacao precisa esperar a trava de health.json");
+        liberar.countDown();
+        init.join(10_000);
+        assertFalse(init.isAlive());
+        escritor.join(10_000);
+        assertNull(erro.get());
+        assertNotNull(nova.get());
+        assertEquals("cooldown", s.effectiveState("bluesky"), "init sobrescreveu health.json da rede bloqueada");
+    }
+
+    /** Varias instancias inicializando juntas no mesmo home nao falham nem brigam pelos arquivos. */
+    @Test
+    void inicializacaoConcorrenteDeVariasInstancias() throws Exception {
+        Path home = tmp.resolve("home-varios");
+        Thread[] ts = new Thread[6];
+        for (int i = 0; i < ts.length; i++) {
+            ts[i] = new Thread(() -> new Store(home));
+            ts[i].start();
+        }
+        for (Thread t : ts) t.join(10_000);
+        for (Thread t : ts) assertFalse(t.isAlive(), "inicializacao travou");
+        assertTrue(Files.exists(home.resolve("config.json")));
+        assertTrue(Files.exists(home.resolve("health.json")));
+        assertTrue(Files.exists(home.resolve("journal.jsonl")));
+        assertEquals("{}", Json.write(new Store(home).health()));
+    }
+
+    @Test
+    void focoErradoDepoisDoCliqueContaTentativa() {
+        RuntimeException e = Tools.falhaFocoAposClique("css:#campo");
+        assertFalse(e instanceof RealClick.NaoAgiu);
+        assertTrue(Tools.talvezAgiu("type", e, Json.obj()));
+        assertTrue(e.getMessage().contains("tentativa registrada"));
+    }
+
+    @Test
+    void segredoTruncadoMultilineNaoVaza() {
+        String r = Tools.redigir("{\"session\": {\n  \"value\": \"opaque-segunda-linha\"\n \"outro\": \"dado\"");
+        assertFalse(r.contains("opaque-segunda-linha"), r);
+        assertFalse(r.contains("dado"), r);
+        assertTrue(r.contains("[redigido]"), r);
+    }
+
+    @Test
+    void claimRespeitaTransicaoDoLote() throws Exception {
+        Store s = store();
+        BatchStore bs = new BatchStore(s);
+        String id = aprovado(bs);
+        JsonNode previa = bs.requireApproved(id);
+        try (Store.Trava t = s.lock(BatchStore.loteLock(id))) {
+            assertThrows(IllegalStateException.class, () -> bs.claim(id, previa));
+            assertTrue(Files.exists(s.batchesDir().resolve(id + ".approved.json")));
+            assertFalse(Files.exists(s.batchesDir().resolve(id + ".running.json")));
+        }
+        assertEquals(id, bs.claim(id, previa).path("id").asText());
+    }
+
+    @Test
+    void lockEsperaOutraInstanciaNaMesmaJvmESoltaAoInterromper() throws Exception {
+        Store s = store();
+        Store outra = new Store(s.home);
+        CountDownLatch iniciada = new CountDownLatch(1);
+        AtomicReference<Throwable> falha = new AtomicReference<>();
+        AtomicBoolean interrompida = new AtomicBoolean();
+        Thread espera = new Thread(() -> {
+            iniciada.countDown();
+            try (Store.Trava t = outra.lock("teste")) {
+                fail("nao deveria adquirir antes de ser interrompida");
+            } catch (java.io.IOException e) {
+                interrompida.set(Thread.currentThread().isInterrupted());
+            } catch (Throwable e) {
+                falha.set(e);
+            }
+        });
+        try (Store.Trava t = s.lock("teste")) {
+            espera.start();
+            assertTrue(iniciada.await(5, TimeUnit.SECONDS));
+            espera.join(200);
+            assertTrue(espera.isAlive(), "deve esperar, sem OverlappingFileLockException");
+            assertNull(outra.tryLock("teste"));
+            espera.interrupt();
+            espera.join(5000);
+            assertFalse(espera.isAlive());
+            assertNull(falha.get());
+            assertTrue(interrompida.get());
+        } finally {
+            espera.interrupt();
+            espera.join(5000);
+        }
+        try (Store.Trava t = outra.tryLock("teste")) { assertNotNull(t); }
+    }
+
+    @Test
+    void registroDeSemaforosNaoAcumulaTravasConcluidas() throws Exception {
+        Store s = store();
+        var campo = Store.class.getDeclaredField("SEMAFOROS");
+        campo.setAccessible(true);
+        int antes = ((java.util.Map<?, ?>) campo.get(null)).size();
+        for (int i = 0; i < 100; i++) {
+            try (Store.Trava t = s.lock("temporaria-" + i)) { assertNotNull(t); }
+        }
+        assertEquals(antes, ((java.util.Map<?, ?>) campo.get(null)).size());
+    }
+
+    @Test
+    void falhaAoAbrirCanalLiberaSemaforo() throws Exception {
+        Store s = store();
+        Files.createDirectory(s.locksDir().resolve("invalida.lock"));
+        assertThrows(java.io.IOException.class, () -> s.lock("invalida"));
+        assertThrows(java.io.IOException.class, () -> s.tryLock("invalida"));
+        Files.delete(s.locksDir().resolve("invalida.lock"));
+        try (Store.Trava t = s.tryLock("invalida")) { assertNotNull(t); }
+        assertThrows(IllegalArgumentException.class, () -> s.lock("../escape"));
+        assertThrows(IllegalArgumentException.class, () -> s.tryLock("../escape"));
+    }
+    @Test
+    void conflitoDeCanalDiretoLiberaRecursosDaFila() throws Exception {
+        Store s = store();
+        try (var canal = java.nio.channels.FileChannel.open(s.locksDir().resolve("direto.lock"),
+                java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE);
+             var trava = canal.lock()) {
+            assertThrows(java.nio.channels.OverlappingFileLockException.class, () -> s.lock("direto"));
+            assertNull(s.tryLock("direto"));
+        }
+        try (Store.Trava t = s.tryLock("direto")) { assertNotNull(t); }
+    }
+
+    @Test
+    void closeFechaCanalESoltaTrava() throws Exception {
+        Store s = store();
+        Store.Trava t = s.lock("fechar");
+        var campo = Store.Trava.class.getDeclaredField("ch");
+        campo.setAccessible(true);
+        var canal = (java.nio.channels.FileChannel) campo.get(t);
+        t.close();
+        assertFalse(canal.isOpen());
+        try (Store.Trava outra = s.tryLock("fechar")) { assertNotNull(outra); }
     }
 }
