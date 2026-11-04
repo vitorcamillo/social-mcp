@@ -23,6 +23,7 @@ Depois compile este servidor:
 ```bash
 git clone https://github.com/vitorcamillo/social-mcp.git
 cd social-mcp
+bash scripts/install-javadriveless-public.sh  # SDK publico 1.12.3, origem e hashes verificados
 mvn -B -ntp package
 ./bin/social-mcp --cli status
 ```
