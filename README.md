@@ -1,16 +1,16 @@
 # Social MCP
 
-Social MCP is a Java 21 MCP server for operating social-network sessions in a real desktop Chrome through [javaDriveless](https://github.com/vitorcamillo/javaDriveless). It keeps one browser profile per network and separates read-only browsing from public actions.
+O Social MCP é um servidor MCP em Java 21 para operar sessões de redes sociais em um Chrome desktop real por meio do [javaDriveless](https://github.com/vitorcamillo/javaDriveless). Ele mantém um perfil de navegador por rede e separa a navegação somente para leitura das ações públicas.
 
-The server is deliberately conservative: public actions are drafted into a batch, checked against per-network quotas and tripwires, and require an explicit terminal approval before execution. A kill switch and an append-only journal provide local operational control. This project does not bypass CAPTCHAs, anti-spam systems, account restrictions, or platform rules. Use it only with accounts you control and follow each platform's terms.
+O servidor é deliberadamente conservador: as ações públicas são preparadas em um lote, verificadas contra as cotas e os disjuntores de cada rede e só podem ser executadas depois de uma aprovação explícita no terminal. Um kill switch e um journal somente de acréscimo oferecem controle operacional local. Este projeto não contorna CAPTCHAs, sistemas antispam, restrições de contas nem regras de plataformas. Use-o somente com contas que você controla e siga os termos de cada plataforma.
 
-## Requirements
+## Requisitos
 
-- Java 21 and Maven 3.9+
-- Google Chrome with a usable desktop display (`DISPLAY` on Linux)
-- A separately installed or locally built `javaDriveless` 1.12.2
+- Java 21 e Maven 3.9+
+- Google Chrome com um display desktop utilizável (`DISPLAY` no Linux)
+- `javaDriveless` 1.12.2 instalado separadamente ou compilado localmente
 
-Build the browser library first:
+Compile primeiro a biblioteca do navegador:
 
 ```bash
 git clone https://github.com/vitorcamillo/javaDriveless.git
@@ -18,7 +18,7 @@ cd javaDriveless
 mvn -B -ntp install
 ```
 
-Then build this server:
+Depois compile este servidor:
 
 ```bash
 git clone https://github.com/vitorcamillo/social-mcp.git
@@ -27,24 +27,24 @@ mvn -B -ntp package
 ./bin/social-mcp --cli status
 ```
 
-The launcher stores state in `~/.social-mcp-public` by default. Set `SOCIAL_MCP_HOME` to an isolated directory when running tests or more than one installation. The directory contains configuration, journal entries, batches, screenshots, and browser profiles; never share it or commit it.
+Por padrão, o launcher armazena o estado em `~/.social-mcp-public`. Defina `SOCIAL_MCP_HOME` para um diretório isolado ao executar testes ou mais de uma instalação. O diretório contém configuração, entradas do journal, lotes, screenshots e perfis do navegador; nunca o compartilhe nem o versione.
 
-## Gate configuration
+## Configuração do gate
 
-The public defaults intentionally have no gate command. Approval fails closed until you configure a local gate in `config.json` under `defaults.gate.command`. The command receives `pre --batch <path> --config <path> --json` and must write a JSON object such as `{"resultado":"PASS"}` (or `WARN`/`FAIL`) and return a compatible exit status. Keep the gate executable local and review its source before use. After reviewing the complete draft, approve it explicitly with `./bin/social-mcp --cli approve <batch-id> humano "reviewed"`; there is no example gate that approves everything.
+Por padrão, não há comando de gate configurado. A aprovação falha de forma fechada até que você configure um gate local em `config.json`, dentro de `defaults.gate.command`. O comando recebe `pre --batch <path> --config <path> --json` e deve escrever um objeto JSON como `{"resultado":"PASS"}` (ou `WARN`/`FAIL`) e retornar um status de saída compatível. Mantenha o executável do gate local e revise seu código antes de usá-lo. Depois de revisar o rascunho completo, aprove-o explicitamente com `./bin/social-mcp --cli approve <batch-id> humano "reviewed"`; não existe um gate de exemplo que aprove tudo.
 
-The CLI approval records a role supplied by the caller (`humano` or `orquestrador`); it is not an identity provider. Treat access to the host and the `SOCIAL_MCP_HOME` directory as trusted. An MCP client or agent with shell access can invoke the CLI, so use operating-system permissions and human review for real accounts.
+A aprovação pelo CLI registra o papel informado por quem chama (`humano` ou `orquestrador`); ela não funciona como um provedor de identidade. Trate o acesso ao host e ao diretório `SOCIAL_MCP_HOME` como confiável. Um cliente MCP ou agente com acesso ao shell pode chamar o CLI, portanto use as permissões do sistema operacional e revisão humana para contas reais.
 
-## MCP tools
+## Ferramentas MCP
 
-The server communicates over newline-delimited JSON-RPC on stdio. It exposes status, browsing, reading, screenshots, draft batches, execution of approved batches, state controls, and journal inspection. Session cookies are never part of this repository: log in interactively in the profile owned by the user, or import a session file supplied by that user, then protect the runtime directory.
+O servidor se comunica por JSON-RPC delimitado por novas linhas em stdio. Ele expõe status, navegação, leitura, screenshots, criação de lotes em rascunho, execução de lotes aprovados, controles de estado e inspeção do journal. Cookies de sessão nunca fazem parte deste repositório: faça login interativamente no perfil pertencente ao usuário ou importe um arquivo de sessão fornecido por ele e proteja o diretório de runtime.
 
-The public source contains synthetic tests only. It does not contain an account, a browser profile, a cookie export, a proxy credential, a marketing plan, or a hosted service.
+O código público contém somente testes sintéticos. Ele não contém uma conta, um perfil de navegador, uma exportação de cookies, uma credencial de proxy, um plano de marketing nem um serviço hospedado.
 
-## Contributing
+## Contribuição
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Please include a focused test for behavior changes and never include runtime data, screenshots, cookies, access tokens, or account identifiers in an issue or pull request.
+Consulte [CONTRIBUTING.md](CONTRIBUTING.md). Inclua um teste focado para mudanças de comportamento e nunca inclua dados de runtime, screenshots, cookies, tokens de acesso ou identificadores de contas em uma issue ou pull request.
 
-## License
+## Licença
 
-This project is released under the MIT License. See [LICENSE](LICENSE).
+Este projeto é distribuído sob a Licença MIT. Consulte [LICENSE](LICENSE).

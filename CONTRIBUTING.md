@@ -1,9 +1,9 @@
-# Contributing
+# Como contribuir
 
-1. Fork the repository and create a focused branch.
-2. Keep changes scoped to the public server and its synthetic tests.
-3. Run `mvn -B -ntp test` and `mvn -B -ntp package` before opening a pull request.
-4. Run a redacted secret scan such as `gitleaks dir --redact --no-banner .`.
-5. Describe the behavior changed, the tests run, and any platform-specific limitation.
+1. Faça um fork do repositório e crie uma branch focada.
+2. Mantenha as mudanças restritas ao servidor público e aos seus testes sintéticos.
+3. Execute `mvn -B -ntp test` e `mvn -B -ntp package` antes de abrir um pull request.
+4. Execute uma varredura de segredos com redação, como `gitleaks dir --redact --no-banner .`.
+5. Descreva o comportamento alterado, os testes executados e qualquer limitação específica da plataforma.
 
-Never submit cookies, browser profiles, screenshots containing account data, proxy URLs with credentials, access tokens, or private operating instructions. Reports about a possible security issue should follow [SECURITY.md](SECURITY.md).
+Nunca envie cookies, perfis de navegador, screenshots contendo dados de contas, URLs de proxy com credenciais, tokens de acesso ou instruções operacionais privadas. Relatos sobre possíveis problemas de segurança devem seguir [SECURITY.md](SECURITY.md).
