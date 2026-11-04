@@ -1,0 +1,48 @@
+{
+  "network": "pinterest",
+  "mapeadoEm": "2026-10-21",
+  "actions": {
+    "delete_post": {
+      "params": ["postId"],
+      "steps": [
+        {"kind":"goto","url":"https://br.pinterest.com/pin/{{postId}}/"},
+        {"kind":"verify_text","expect":"{{postId}}"},
+        {"kind":"request","method":"POST","url":"https://br.pinterest.com/resource/PinResource/delete/",
+         "headers":{"content-type":"application/x-www-form-urlencoded","x-requested-with":"XMLHttpRequest"},
+         "body":"source_url=/pin/{{postId}}/&data={\"options\":{\"id\":\"{{postId}}\"},\"context\":{}}",
+         "csrf":{"header":"x-csrftoken","cookie":"csrftoken"},"expectStatus":[200],
+         "description":"Apaga o pin via API interna"},
+        {"kind":"goto","url":"https://br.pinterest.com/pin/{{postId}}/"},
+        {"kind":"verify_text","expect":"encontrad"}
+      ]
+    },
+    "reply": {
+      "params": ["postId", "text"],
+      "textField": "text",
+      "steps": [
+        {"kind":"goto","url":"https://br.pinterest.com/pin/{{postId}}/"},
+        {"kind":"request","method":"POST","url":"https://br.pinterest.com/resource/AggregatedCommentResource/create/",
+         "headers":{"content-type":"application/json"},
+         "body":"{\"pin\":\"{{postId}}\",\"text\":\"{{text}}\"}",
+         "csrf":{"header":"x-csrftoken","cookie":"csrftoken"},"expectStatus":[200]},
+        {"kind":"verify_text","expect":"{{text}}"}
+      ]
+    },
+    "list_posts": {
+      "params": [],
+      "readOnly": true,
+      "steps": [
+        {"kind":"goto","url":"https://br.pinterest.com/example_account/_pins/"},
+        {"kind":"extract","what":"links","match":"/pin/"}
+      ]
+    },
+    "get_post_ruim": {
+      "params": ["postId"],
+      "readOnly": true,
+      "steps": [
+        {"kind":"goto","url":"https://br.pinterest.com/pin/{{postId}}/"},
+        {"kind":"click","selector":"css:button"}
+      ]
+    }
+  }
+}

@@ -1,0 +1,27 @@
+target/
+out/
+*.class
+*.log
+.idea/
+.vscode/
+*.iml
+
+# Runtime state: profiles, cookies, batches, screenshots, journal and kill switch
+.social-mcp-public/
+.javadriveless_profiles/
+profiles/
+screenshots/
+batches/
+journal.jsonl
+health.json
+STOP
+
+# Local gate configuration and machine-specific settings
+config.local.json
+config.json
+dependency-reduced-pom.xml
+quality-gate*.json
+__pycache__/
+.env
+.env.*
+!.env.example

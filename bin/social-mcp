@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Social MCP — wrapper unico.
+#   bin/social-mcp                     roda o servidor MCP (stdio) — usado pelo agente
+#   bin/social-mcp --cli status        CLI do aprovador unico (dono ou orquestrador ativo)
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+JAR="$DIR/target/social-mcp-0.1.0.jar"
+
+export SOCIAL_MCP_HOME="${SOCIAL_MCP_HOME:-$HOME/.social-mcp-public}"
+export DISPLAY="${DISPLAY:-:0}"
+# DISPLAY herdado pode apontar para uma sessao X morta (ex.: :0 apos reboot/logoff).
+# Nesse caso, detecta o primeiro socket X11 vivo; o javaDriveless exige display real.
+if ! xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
+  for _x in /tmp/.X11-unix/X*; do
+    [ -S "$_x" ] || continue
+    _d=":${_x##*X}"
+    if xdpyinfo -display "$_d" >/dev/null 2>&1; then
+      export DISPLAY="$_d"
+      break
+    fi
+  done
+fi
+unset _x _d
+# Recuperacao de lock stale comprovado: a lib so remove lock com owner PROVEN_STALE,
+# DevTools inacessivel e revalidacao antes de cada remocao; lock vivo/ambiguo e mantido.
+# Default true; valor explicito do operador (inclusive false) e preservado.
+export JAVA_DRIVERLESS_UNLOCK_STALE_PROFILE_LOCKS="${JAVA_DRIVERLESS_UNLOCK_STALE_PROFILE_LOCKS:-true}"
+export JAVA_DRIVERLESS_LOG_LEVEL="${JAVA_DRIVERLESS_LOG_LEVEL:-warn}"
+export JAVA_DRIVERLESS_LOG_STARTUP_BANNER="${JAVA_DRIVERLESS_LOG_STARTUP_BANNER:-false}"
+mkdir -p "$SOCIAL_MCP_HOME"
+
+# CWD de chamada da CLI: fichas de --fatos relativas sao daqui, nao do home do MCP
+PWD_CHAMADA="$(pwd)"
+
+# CWD = home do MCP para os profiles do Chrome (sessoes persistentes por rede)
+cd "$SOCIAL_MCP_HOME"
+
+if [ ! -f "$JAR" ]; then
+  (cd "$DIR" && mvn -q -DskipTests package)
+fi
+
+if [ "${1:-}" = "--cli" ]; then
+  shift
+  # resolve --fatos <arquivo> relativo ANTES de interpretar a CLI: o cd acima faria o
+  # gate procurar a ficha em SOCIAL_MCP_HOME (e talvez usar uma homonima de lá)
+  args=()
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--fatos" ] && [ "$#" -ge 2 ]; then
+      args+=("$1")
+      case "$2" in
+        /*) args+=("$2") ;;
+        *) args+=("$PWD_CHAMADA/$2") ;;
+      esac
+      shift 2
+    else
+      args+=("$1")
+      shift
+    fi
+  done
+  exec java -Dfile.encoding=UTF-8 -jar "$JAR" --cli "${args[@]}"
+fi
+exec java -Dfile.encoding=UTF-8 -jar "$JAR"
