@@ -113,6 +113,7 @@ public class BatchStore {
         validateSetFileOrder(actions);
         validateWaitBudget(actions);
         validateIdPairs(actions);
+        validateGotoIdNovo(actions);
         // clickMode tambem na execucao: lote aprovado antes da regra (campo ignorado) nao vira clique dom no tiktok
         int i = 0;
         for (JsonNode a : actions) {
@@ -136,7 +137,9 @@ public class BatchStore {
         }
         switch (kind) {
             case "goto" -> {
-                if (a.path("url").asText("").isBlank()) throw new IllegalArgumentException("acao " + idx + ": goto exige url");
+                String url = a.path("url").asText("");
+                if (url.isBlank()) throw new IllegalArgumentException("acao " + idx + ": goto exige url");
+                if (url.contains("[[")) validateGotoMarcador(url, idx);
             }
             case "wait" -> validateWait(a, idx);
             case "click" -> {
@@ -824,6 +827,73 @@ public class BatchStore {
             return decoded.contains(approved) || decoded.contains(escaped);
         } catch (IllegalArgumentException e) {
             return false;
+        }
+    }
+
+    /** Marcador valido no goto: [[novo:NOME]] (NOME casa name do par capture/verify). */
+    private static final java.util.regex.Pattern MARCADOR_GOTO_OK =
+            java.util.regex.Pattern.compile("\\[\\[novo:[A-Za-z][A-Za-z0-9_]*]]");
+    /** Qualquer [[...]] no url do goto: cada um precisa ser um marcador valido. */
+    private static final java.util.regex.Pattern MARCADOR_GOTO_QUALQUER =
+            java.util.regex.Pattern.compile("\\[\\[.*?]]");
+
+    /**
+     * Marcador [[novo:NOME]] no goto: todo [[...]] tem de casar [[novo:NOME]]; tirando os
+     * marcadores (cada um vira X) a url tem de ser https com host; e o marcador so vale no
+     * path (depois da primeira / seguinte a ://), nunca no host.
+     */
+    private static void validateGotoMarcador(String url, int idx) {
+        java.util.regex.Matcher m = MARCADOR_GOTO_QUALQUER.matcher(url);
+        StringBuilder semMarcador = new StringBuilder();
+        int ultimo = 0;
+        int primeiro = -1;
+        while (m.find()) {
+            if (!MARCADOR_GOTO_OK.matcher(m.group()).matches()) {
+                throw new IllegalArgumentException("acao " + idx + ": goto com marcador invalido (use [[novo:NOME]])");
+            }
+            if (primeiro < 0) primeiro = m.start();
+            semMarcador.append(url, ultimo, m.start()).append('X');
+            ultimo = m.end();
+        }
+        semMarcador.append(url, ultimo, url.length());
+        if (semMarcador.indexOf("[[") >= 0) {
+            // "[[" sem fecho: nao e um marcador completo
+            throw new IllegalArgumentException("acao " + idx + ": goto com marcador invalido (use [[novo:NOME]])");
+        }
+        java.net.URI uri;
+        try {
+            uri = new java.net.URI(semMarcador.toString());
+        } catch (java.net.URISyntaxException e) {
+            uri = null;
+        }
+        int fimScheme = url.indexOf("://");
+        int inicioPath = fimScheme < 0 ? -1 : url.indexOf('/', fimScheme + 3);
+        if (uri == null || !"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null
+                || inicioPath < 0 || primeiro <= inicioPath) {
+            throw new IllegalArgumentException("acao " + idx + ": [[novo:...]] so no path da url");
+        }
+    }
+
+    /** goto com [[novo:NOME]] exige verify_new_id com name NOME em indice anterior do mesmo lote. */
+    static void validateGotoIdNovo(JsonNode actions) {
+        Set<String> verificados = new HashSet<>();
+        int i = 0;
+        for (JsonNode a : actions) {
+            String kind = a.path("kind").asText("");
+            if ("verify_new_id".equals(kind)) {
+                verificados.add(a.path("name").asText(""));
+            } else if ("goto".equals(kind)) {
+                java.util.regex.Matcher m = MARCADOR_GOTO_OK.matcher(a.path("url").asText(""));
+                while (m.find()) {
+                    String marcador = m.group();
+                    String nome = marcador.substring("[[novo:".length(), marcador.length() - 2);
+                    if (!verificados.contains(nome)) {
+                        throw new IllegalArgumentException("acao " + i + ": [[novo:" + nome
+                                + "]] sem verify_new_id anterior com esse name");
+                    }
+                }
+            }
+            i++;
         }
     }
 

@@ -29,6 +29,8 @@ public class Tools {
     private final Map<String, NewIds.Captura> capturas = new HashMap<>();
     /** Trace passivo de resposta de publicacao por name (opt-in responseProof); fechado no finally do lote/readOnly. */
     private final Map<String, PublishTrace> traces = new HashMap<>();
+    /** idNovo provado por verify_new_id (name -> id) no lote em curso, para [[novo:NOME]] no goto. */
+    private final Map<String, String> idsNovosLote = new HashMap<>();
 
     /** Fecha TODOS os traces e limpa o mapa; nao falha o lote se um close falhar. */
     private int fecharTraces() {
@@ -324,6 +326,7 @@ public class Tools {
         int n = 1;
         prazoFimMs = System.currentTimeMillis() + PRAZO_LOTE_MS;
         capturas.clear();
+        idsNovosLote.clear();
         int traceCleanupFailures = fecharTraces();
         try {
             for (JsonNode a : plan.steps()) {
@@ -365,6 +368,7 @@ public class Tools {
         } finally {
             prazoFimMs = Long.MAX_VALUE;
             capturas.clear();
+            idsNovosLote.clear();
             traceCleanupFailures += fecharTraces();
         }
         store.appendJournal("browse", network, Json.obj().put("action", plan.action()).set("urls", urls));
@@ -480,6 +484,7 @@ public class Tools {
         long inicio = System.currentTimeMillis();
         prazoFimMs = inicio + PRAZO_LOTE_MS;
         capturas.clear();
+        idsNovosLote.clear();
         int traceCleanupFailures = fecharTraces();
         try {
             for (int passoIdx = 0; passoIdx < actions.size(); passoIdx++) {
@@ -505,6 +510,9 @@ public class Tools {
                     String info = runStep(network, kind, a, step, batch, passoIdx);
                     step.put("ok", true);
                     if (info != null) step.put("info", info);
+                    if ("verify_new_id".equals(kind) && !step.path("idNovo").asText("").isEmpty()) {
+                        idsNovosLote.put(a.path("name").asText(""), step.path("idNovo").asText());
+                    }
                     journalAction(store, network, kind, a, id, step, true);
                     if (Guard.isPublic(kind) && !step.path("pulado").asBoolean(false)) publicoFeito = true;
                     String sample = BrowserPool.visibleText(pool.get(network), 4000);
@@ -566,6 +574,7 @@ public class Tools {
         } finally {
             prazoFimMs = Long.MAX_VALUE;
             capturas.clear();
+            idsNovosLote.clear();
             traceCleanupFailures += fecharTraces();
         }
 
@@ -706,12 +715,46 @@ public class Tools {
         return runStep(network, kind, a, out, null, -1);
     }
 
+    /** Marcador [[novo:NOME]] no url do goto; NOME e o name do par capture/verify ([A-Za-z][A-Za-z0-9_]*). */
+    static final java.util.regex.Pattern MARCADOR_ID_NOVO =
+            java.util.regex.Pattern.compile("\\[\\[novo:([A-Za-z][A-Za-z0-9_]*)]]");
+    /** id novo aceito na substituicao (o que o verify_new_id extraiu): sem chars de url tipo / ? &. */
+    private static final java.util.regex.Pattern ID_NOVO_OK = java.util.regex.Pattern.compile("[A-Za-z0-9_-]{1,200}");
+
+    /**
+     * Troca cada [[novo:NOME]] do url pelo idNovo do verify_new_id com name NOME que deu ok antes
+     * no mesmo lote. Sem marcador, devolve o url igual; marcador sem verify ok anterior, ou id
+     * com caracteres que nao sao de id (ex.: / ?), falham o passo.
+     */
+    static String resolverIdNovo(String url, java.util.Map<String, String> ids) {
+        java.util.regex.Matcher m = MARCADOR_ID_NOVO.matcher(url);
+        StringBuilder sb = new StringBuilder();
+        int ultimo = 0;
+        while (m.find()) {
+            String nome = m.group(1);
+            String id = ids.get(nome);
+            if (id == null) {
+                throw new IllegalStateException("goto: [[novo:" + nome
+                        + "]] sem verify_new_id ok anterior com esse name neste lote");
+            }
+            if (!ID_NOVO_OK.matcher(id).matches()) {
+                throw new IllegalStateException("goto: id novo com caracteres invalidos");
+            }
+            sb.append(url, ultimo, m.start()).append(id);
+            ultimo = m.end();
+        }
+        if (ultimo == 0) return url;
+        sb.append(url, ultimo, url.length());
+        return sb.toString();
+    }
+
     /** Executa um passo; extras (status, bodySnippet, extraido) vao em out. batch/passoIdx localizam a midia aprovada. */
     private String runStep(String network, String kind, JsonNode a, ObjectNode out, JsonNode batch, int passoIdx) throws Exception {
         JavaDriverless d = pool.get(network);
         switch (kind) {
             case "goto" -> {
-                d.get(a.path("url").asText());
+                String url = resolverIdNovo(a.path("url").asText(), idsNovosLote);
+                d.get(url);
                 d.sleep(1.2);
                 return "navegou para " + safe(() -> d.getCurrentUrl());
             }
