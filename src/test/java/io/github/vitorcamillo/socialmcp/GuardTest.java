@@ -136,6 +136,16 @@ class GuardTest {
     }
 
     @Test
+    void tripwireIgnoraFraseConhecidaMasPegaDesafioNovo() {
+        Store s = store();
+        ObjectNode cfg = s.networkCfg("reddit");
+        cfg.putArray("tripwireIgnore").add("Para continuar usando o Reddit, verifique se você é humano ou registre-se como um app");
+        String notificacao = "Verifique sua conta\nPara continuar usando o Reddit, verifique se você\né humano ou registre-se como um app em até 7 dias.";
+        assertFalse(Guard.hitsTripwire(notificacao, cfg));
+        assertTrue(Guard.hitsTripwire(notificacao + " Verifique se você é humano para continuar.", cfg));
+    }
+
+    @Test
     void aplicarTripwireColocaCooldownEBloqueiaAcaoPublica() {
         Store s = store();
         Tools tools = new Tools(s);

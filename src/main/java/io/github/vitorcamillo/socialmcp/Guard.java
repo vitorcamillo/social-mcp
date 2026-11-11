@@ -75,7 +75,15 @@ public final class Guard {
     public static String tripwireMatch(String pageText, ObjectNode netCfg) {
         if (pageText == null || pageText.isBlank()) return null;
         if (netCfg == null) return null;
-        String lower = pageText.toLowerCase();
+        String lower = pageText.toLowerCase().replaceAll("\\s+", " ");
+        // frases conhecidas e inofensivas (ex.: notificacao antiga ja resolvida) saem antes do casamento
+        JsonNode ignorar = netCfg.path("tripwireIgnore");
+        if (ignorar.isArray()) {
+            for (JsonNode t : ignorar) {
+                String frase = t.asText("").trim().toLowerCase().replaceAll("\\s+", " ");
+                if (!frase.isEmpty()) lower = lower.replace(frase, " ");
+            }
+        }
         JsonNode arr = netCfg.path("tripwires");
         if (arr.isArray()) {
             for (JsonNode t : arr) {
