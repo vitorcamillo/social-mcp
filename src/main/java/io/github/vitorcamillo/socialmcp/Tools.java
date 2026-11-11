@@ -12,6 +12,9 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Tools expostos via MCP. Filosofia:
@@ -31,6 +34,10 @@ public class Tools {
     private final Map<String, PublishTrace> traces = new HashMap<>();
     /** idNovo provado por verify_new_id (name -> id) no lote em curso, para [[novo:NOME]] no goto. */
     private final Map<String, String> idsNovosLote = new HashMap<>();
+    /** Serializa as chamadas MCP com o fechamento de Chromes ociosos (um Chrome por rede). */
+    private final Object chamada = new Object();
+    /** Fecha Chromes ociosos a cada 60 s (daemon: nao segura a JVM). */
+    private final ScheduledExecutorService idle;
 
     /** Fecha TODOS os traces e limpa o mapa; nao falha o lote se um close falhar. */
     private int fecharTraces() {
@@ -60,9 +67,25 @@ public class Tools {
         this.pool = new BrowserPool(store);
         this.recipes = new Recipes(store);
         this.defs = (ArrayNode) Json.parse(TOOL_DEFS);
+        this.idle = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "social-mcp-idle");
+            t.setDaemon(true);
+            return t;
+        });
+        this.idle.scheduleAtFixedRate(() -> {
+            try {
+                synchronized (chamada) {
+                    List<String> f = pool.closeIdle();
+                    if (!f.isEmpty()) System.err.println("[social-mcp] Chrome ocioso fechado: " + f);
+                }
+            } catch (Exception e) {
+                System.err.println("[social-mcp] falha ao fechar Chrome ocioso: " + e.getMessage());
+            }
+        }, 60, 60, TimeUnit.SECONDS);
     }
 
     public void shutdown() {
+        idle.shutdownNow();
         pool.closeAll();
     }
 
@@ -71,19 +94,21 @@ public class Tools {
     }
 
     public String call(String name, JsonNode args) throws Exception {
-        return switch (name) {
-            case "social_status" -> status();
-            case "social_browse" -> browse(args);
-            case "social_read" -> read(args);
-            case "social_inspect" -> inspect(args);
-            case "social_screenshot" -> screenshot(args);
-            case "social_draft_batch" -> draftBatch(args);
-            case "social_action" -> action(args);
-            case "social_execute_batch" -> executeBatch(args);
-            case "social_set_network_state" -> setNetworkState(args);
-            case "social_journal_tail" -> journalTail(args);
-            default -> throw new IllegalArgumentException("tool desconhecida: " + name);
-        };
+        synchronized (chamada) {
+            return switch (name) {
+                case "social_status" -> status();
+                case "social_browse" -> browse(args);
+                case "social_read" -> read(args);
+                case "social_inspect" -> inspect(args);
+                case "social_screenshot" -> screenshot(args);
+                case "social_draft_batch" -> draftBatch(args);
+                case "social_action" -> action(args);
+                case "social_execute_batch" -> executeBatch(args);
+                case "social_set_network_state" -> setNetworkState(args);
+                case "social_journal_tail" -> journalTail(args);
+                default -> throw new IllegalArgumentException("tool desconhecida: " + name);
+            };
+        }
     }
 
     // ---------- leitura ----------
@@ -413,11 +438,24 @@ public class Tools {
         if (!netPrevia.matches("[A-Za-z0-9_-]+")) throw new IllegalStateException("lote " + id + " sem rede valida");
         // varios clientes sobem o MCP por stdio: um lote por rede por vez em toda a maquina
         try (Store.Trava trava = store.tryLock("exec-" + netPrevia)) {
-            if (trava == null) {
-                throw new IllegalStateException("outro processo do MCP esta executando um lote de '" + netPrevia
-                        + "' agora; tente depois que ele terminar (cota e espacamento valem entre processos)");
+            try {
+                if (trava == null) {
+                    throw new IllegalStateException("outro processo do MCP esta executando um lote de '" + netPrevia
+                            + "' agora; tente depois que ele terminar (cota e espacamento valem entre processos)");
+                }
+                return executeLocked(id);
+            } finally {
+                // libera o Chrome da rede apos o lote (o proximo uso reabre): erro no
+                // fechamento nunca troca o resultado nem a excecao original do lote
+                if (trava != null) {
+                    try {
+                        if (store.networkCfg(netPrevia).path("closeAfterBatch").asBoolean(true)) {
+                            pool.close(netPrevia);
+                        }
+                    } catch (RuntimeException ignored) {
+                    }
+                }
             }
-            return executeLocked(id);
         }
     }
 

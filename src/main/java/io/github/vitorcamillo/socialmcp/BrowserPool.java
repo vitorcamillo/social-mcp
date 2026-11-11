@@ -8,11 +8,15 @@ import io.github.selenium.javaDriverless.profiles.SdkProfilePresets;
 import io.github.selenium.javaDriverless.types.ChromeOptions;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
+import java.util.function.ToLongFunction;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -44,31 +48,77 @@ public class BrowserPool implements AutoCloseable {
 
     private final Store store;
     private final Map<String, JavaDriverless> drivers = new ConcurrentHashMap<>();
+    /** Ultimo uso de cada Chrome aberto (para fechar o ocioso sem derrubar o ativo). */
+    private final Map<String, Long> lastUse = new ConcurrentHashMap<>();
+    private final LongSupplier clock;
 
     public BrowserPool(Store store) {
+        this(store, System::currentTimeMillis);
+    }
+
+    BrowserPool(Store store, LongSupplier clock) {
         this.store = store;
+        this.clock = clock;
     }
 
     public JavaDriverless get(String network) {
-        return drivers.computeIfAbsent(network, n -> {
-            ObjectNode cfg = store.networkCfg(n);
-            // storageDir nao-nulo: o SdkProfile passa a ser dono do user-data-dir,
-            // entao o gerenciamento de profiles do JavaDriverless fica OFF (exigencia dele).
-            String dir = storageDir(n);
-            // Chrome principal VIVO do MESMO profile EXATO: so reaproveita com opt-in
-            // explicito (attachExistingChrome=true). Sem opt-in, conflito claro e NENHUM
-            // lancamento novo (NAO mata processo, NAO apaga lock). Sem processo/porta
-            // valido o lancamento segue normal, com a recuperacao stale da biblioteca.
-            Optional<String> attachTo = resolveAttach(n, cfg, dir, ExistingChrome.findForProfile(Path.of(dir)));
-            ChromeOptions options = attachTo.isPresent()
-                    ? buildAttachOptions(n, cfg, dir, attachTo.get())
-                    : buildOptions(n, cfg, dir);
-            JavaDriverless d = new JavaDriverless("sdk-" + n, options, false);
-            d.setPageLoadTimeout(45_000);
-            d.implicitlyWait(4_000);
-            applyWindowSize(d, n, parseWindowSize(cfg.path("windowSize").asText(null)));
-            return d;
-        });
+        JavaDriverless aberto = drivers.get(network);
+        if (aberto != null) {
+            lastUse.put(network, clock.getAsLong());
+            return aberto;
+        }
+        // Espera pelo perfil FORA de qualquer trava do mapa: outra sessao do MCP
+        // (stdio, um processo por sessao) pode estar com o Chrome deste profile.
+        ObjectNode cfg = store.networkCfg(network);
+        int esperaS = cfg.path("profileWaitSeconds").asInt(90);
+        if (esperaS < 0) esperaS = 0;
+        long fim = clock.getAsLong() + (long) esperaS * 1000L;
+        RuntimeException ultima = null;
+        while (true) {
+            try {
+                JavaDriverless d = launch(network);
+                drivers.put(network, d);
+                lastUse.put(network, clock.getAsLong());
+                return d;
+            } catch (RuntimeException e) {
+                ultima = e;
+                if (clock.getAsLong() >= fim) {
+                    throw new IllegalStateException("perfil da rede '" + network
+                            + "' ocupado ou Chrome nao iniciou apos " + esperaS
+                            + "s (outra sessao do MCP pode estar com ele): " + e.getMessage(), e);
+                }
+                try {
+                    Thread.sleep(5000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw ultima;
+                }
+            }
+        }
+    }
+
+    /**
+     * Abre o Chrome persistente da rede (mesma logica do get antigo, sem mudar nada:
+     * profile proprio, opt-in de attach, timeouts e janela final via CDP).
+     */
+    private JavaDriverless launch(String n) {
+        ObjectNode cfg = store.networkCfg(n);
+        // storageDir nao-nulo: o SdkProfile passa a ser dono do user-data-dir,
+        // entao o gerenciamento de profiles do JavaDriverless fica OFF (exigencia dele).
+        String dir = storageDir(n);
+        // Chrome principal VIVO do MESMO profile EXATO: so reaproveita com opt-in
+        // explicito (attachExistingChrome=true). Sem opt-in, conflito claro e NENHUM
+        // lancamento novo (NAO mata processo, NAO apaga lock). Sem processo/porta
+        // valido o lancamento segue normal, com a recuperacao stale da biblioteca.
+        Optional<String> attachTo = resolveAttach(n, cfg, dir, ExistingChrome.findForProfile(Path.of(dir)));
+        ChromeOptions options = attachTo.isPresent()
+                ? buildAttachOptions(n, cfg, dir, attachTo.get())
+                : buildOptions(n, cfg, dir);
+        JavaDriverless d = new JavaDriverless("sdk-" + n, options, false);
+        d.setPageLoadTimeout(45_000);
+        d.implicitlyWait(4_000);
+        applyWindowSize(d, n, parseWindowSize(cfg.path("windowSize").asText(null)));
+        return d;
     }
 
     /**
@@ -236,6 +286,48 @@ public class BrowserPool implements AutoCloseable {
         return drivers.size();
     }
 
+    /** Fecha o Chrome da rede, se aberto; erro no quit nao falha a chamada. */
+    public void close(String network) {
+        JavaDriverless d = drivers.remove(network);
+        lastUse.remove(network);
+        if (d != null) {
+            try {
+                d.quit();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    /**
+     * Redes cujo Chrome esta ocioso: pura (sem driver), para teste. Devolve,
+     * ordenadas, as redes com idleMs > 0 e now - ultimoUso >= idleMs.
+     */
+    static List<String> idleNetworks(Map<String, Long> lastUse, long now, ToLongFunction<String> idleMsPorRede) {
+        List<String> ociosas = new ArrayList<>();
+        for (Map.Entry<String, Long> e : lastUse.entrySet()) {
+            long idleMs = idleMsPorRede.applyAsLong(e.getKey());
+            if (idleMs > 0 && now - e.getValue() >= idleMs) {
+                ociosas.add(e.getKey());
+            }
+        }
+        ociosas.sort(String::compareTo);
+        return ociosas;
+    }
+
+    /**
+     * Fecha os Chromes sem uso ha browserIdleMinutes (padrao 10; 0 desliga).
+     * Devolve a lista fechada (ordenada).
+     */
+    public List<String> closeIdle() {
+        ToLongFunction<String> idleMsPorRede =
+                n -> Math.max(0, store.networkCfg(n).path("browserIdleMinutes").asLong(10)) * 60_000;
+        List<String> fechadas = idleNetworks(lastUse, clock.getAsLong(), idleMsPorRede);
+        for (String n : fechadas) {
+            close(n);
+        }
+        return fechadas;
+    }
+
     public void closeAll() {
         drivers.values().forEach(d -> {
             try {
@@ -244,6 +336,7 @@ public class BrowserPool implements AutoCloseable {
             }
         });
         drivers.clear();
+        lastUse.clear();
     }
 
     @Override
