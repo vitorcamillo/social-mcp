@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 
-/** Captura passiva e limitada de IDs gerados por publicações em Instagram, TikTok, YouTube, Facebook, Bluesky, Mastodon, X e Pinterest. */
+/** Captura passiva e limitada de IDs gerados por publicações em Instagram, TikTok, YouTube, Facebook, Bluesky, Mastodon, X, Pinterest e Reddit. */
 public final class PublishTrace implements AutoCloseable {
     private static final int MAX_REQUEST_BODY = 64 * 1024;
     private static final int MAX_RESPONSE_BODY = 256 * 1024;
@@ -59,6 +59,7 @@ public final class PublishTrace implements AutoCloseable {
         private int status;
         private boolean finished;
         private boolean queued;
+        private boolean needsPostData;
         private String postData;
         private String path;
     }
@@ -74,6 +75,14 @@ public final class PublishTrace implements AutoCloseable {
     private final Set<String> capturedIds = new HashSet<>();
     private final AtomicBoolean closed = new AtomicBoolean();
     private boolean invalid;
+    private int posts;
+    private int caminhoOk;
+    private int semCorpo;
+    private int comTexto;
+    private final List<Integer> statuses = new ArrayList<>();
+    private int corpos;
+    private String lastError;
+    private final List<String> pathsWithText = new ArrayList<>();
 
     private PublishTrace(Cdp cdp, String network, String approvedText, LongSupplier clockMillis) {
         this.cdp = cdp;
@@ -111,7 +120,7 @@ public final class PublishTrace implements AutoCloseable {
             trace.await(cdp.executeCdpCmd("Network.enable", Map.of("maxResourceBufferSize", 256 * 1024, "maxTotalBufferSize", 1024 * 1024), (float) OP_TIMEOUT_SECONDS));
             return trace;
         } catch (Exception e) {
-            trace.markInvalid();
+            trace.markInvalid(e);
             try { trace.close(); } catch (RuntimeException cleanup) { e.addSuppressed(cleanup); }
             throw new IllegalStateException("Nao foi possivel iniciar captura passiva", e);
         }
@@ -141,8 +150,21 @@ public final class PublishTrace implements AutoCloseable {
                 default -> { }
             }
         } catch (RuntimeException e) {
-            markInvalid();
+            markInvalid(e);
         }
+    }
+
+    public synchronized String diagnostico() {
+        String ids = capturedIds.stream().sorted().limit(5).collect(
+                java.util.stream.Collectors.joining(", ", "[", "]"));
+        String status = statuses.stream().limit(5).map(String::valueOf).collect(
+                java.util.stream.Collectors.joining(", ", "[", "]"));
+        String caminhos = pathsWithText.stream().limit(5).collect(
+                java.util.stream.Collectors.joining(", ", "[", "]"));
+        return "posts=" + posts + " caminhoOk=" + caminhoOk + " semCorpo=" + semCorpo
+                + " comTexto=" + comTexto + " status=" + status + " corpos=" + corpos
+                + " ids=" + ids + " invalido=" + invalid + " erro=" + (lastError == null ? "-" : lastError)
+                + " caminhosComTexto=" + caminhos;
     }
 
     private synchronized void onRequest(JsonNode params) {
@@ -154,9 +176,32 @@ public final class PublishTrace implements AutoCloseable {
             return;
         }
         JsonNode request = params.path("request");
+        String url = request.path("url").asText("");
         if (requestId.isEmpty() || !"POST".equalsIgnoreCase(request.path("method").asText())
-                || !allowedHost(request.path("url").asText())) return;
+                || !hostBase(url)) return;
+        posts++;
         String body = request.path("postData").asText("");
+        boolean empty = body.isEmpty();
+        if (!empty && containsApprovedText(body)) {
+            comTexto++;
+            recordPathWithText(url);
+        }
+        if (!allowedHost(url)) return;
+        caminhoOk++;
+        if (empty) {
+            if (!request.path("hasPostData").asBoolean(false)) return;
+            semCorpo++;
+            if (!requests.containsKey(requestId) && requests.size() >= MAX_REQUESTS) {
+                invalid = true;
+                return;
+            }
+            RequestState state = requests.computeIfAbsent(requestId, ignored -> new RequestState());
+            state.needsPostData = true;
+            if (network.equals("bsky") || network.equals("reddit") || network.equals("ig")) {
+                state.path = URI.create(url).getPath();
+            }
+            return;
+        }
         if (body.getBytes(StandardCharsets.UTF_8).length > MAX_REQUEST_BODY || !containsApprovedText(body)) return;
         if (!requests.containsKey(requestId) && requests.size() >= MAX_REQUESTS) {
             invalid = true;
@@ -165,7 +210,21 @@ public final class PublishTrace implements AutoCloseable {
         RequestState state = requests.computeIfAbsent(requestId, ignored -> new RequestState());
         if (network.equals("bsky")) {
             state.postData = body;
-            state.path = URI.create(request.path("url").asText()).getPath();
+        }
+        if (network.equals("bsky") || network.equals("reddit") || network.equals("ig")) {
+            state.path = URI.create(url).getPath();
+        }
+    }
+
+    private synchronized void recordPathWithText(String url) {
+        if (pathsWithText.size() >= 5) return;
+        try {
+            String path = URI.create(url).getPath();
+            if (path == null) return;
+            if (path.length() > 100) path = path.substring(0, 100);
+            pathsWithText.add(path);
+        } catch (RuntimeException ignored) {
+            // URL invalida: ignora registro de caminho
         }
     }
 
@@ -174,7 +233,9 @@ public final class PublishTrace implements AutoCloseable {
         String requestId = params.path("requestId").asText("");
         RequestState state = requests.get(requestId);
         if (state != null) {
-            state.status = params.path("response").path("status").asInt();
+            int status = params.path("response").path("status").asInt();
+            if (statuses.size() < 5) statuses.add(status);
+            state.status = status;
             if (state.status < 200 || state.status >= 300) requests.remove(requestId);
         }
     }
@@ -189,7 +250,7 @@ public final class PublishTrace implements AutoCloseable {
         try {
             bodyExecutor.execute(() -> fetchResponseBody(requestId));
         } catch (RuntimeException e) {
-            invalid = true;
+            markInvalid(e);
         }
     }
 
@@ -200,9 +261,54 @@ public final class PublishTrace implements AutoCloseable {
                 state = requests.get(requestId);
             }
             if (state == null) return;
+            if (state.needsPostData) {
+                JsonNode postResult;
+                try {
+                    postResult = await(cdp.executeCdpCmd("Network.getRequestPostData",
+                            Map.of("requestId", requestId), (float) OP_TIMEOUT_SECONDS));
+                } catch (Exception e) {
+                    synchronized (this) {
+                        requests.remove(requestId);
+                        lastError = e.getClass().getSimpleName();
+                    }
+                    return;
+                }
+                if (postResult == null) {
+                    synchronized (this) {
+                        requests.remove(requestId);
+                        lastError = "IllegalStateException";
+                    }
+                    return;
+                }
+                String postData = postResult.path("postData").asText("");
+                if (postData.getBytes(StandardCharsets.UTF_8).length > MAX_REQUEST_BODY
+                        || !containsApprovedText(postData)) {
+                    synchronized (this) {
+                        requests.remove(requestId);
+                    }
+                    return;
+                }
+                synchronized (this) {
+                    RequestState current = requests.get(requestId);
+                    if (current == null) return;
+                    state = current;
+                    comTexto++;
+                    if (state.path != null && pathsWithText.size() < 5) {
+                        String p = state.path.length() > 100 ? state.path.substring(0, 100) : state.path;
+                        pathsWithText.add(p);
+                    }
+                    if (network.equals("bsky")) {
+                        state.postData = postData;
+                    }
+                    state.needsPostData = false;
+                }
+            }
             JsonNode result = await(cdp.executeCdpCmd("Network.getResponseBody",
                     Map.of("requestId", requestId), (float) OP_TIMEOUT_SECONDS));
             if (result == null) throw new IllegalStateException("Resposta CDP ausente");
+            synchronized (this) {
+                corpos++;
+            }
             String body = result.path("body").asText("");
             if (result.path("base64Encoded").asBoolean()) {
                 if (body.length() > ((MAX_RESPONSE_BODY + 2) / 3) * 4) {
@@ -215,6 +321,24 @@ public final class PublishTrace implements AutoCloseable {
                 throw new IllegalStateException("Resposta excede limite");
             }
             body = stripXssi(body);
+            if (network.equals("reddit")) {
+                // Resposta HTML do create-comment: o fragmento do comentario novo traz o id como t1_<id>
+                // (atributo thingid, permalink ou JSON embutido; aspas podem vir escapadas). So ids deste
+                // endpoint entram; o verify_new_id ainda exige autor da conta e id ausente da captura.
+                java.util.Set<String> occurrences = new java.util.LinkedHashSet<>();
+                var shreddit = java.util.regex.Pattern.compile("(?<![A-Za-z0-9_])t1_([a-z0-9]{1,16})(?![a-z0-9])").matcher(body);
+                while (shreddit.find()) occurrences.add(shreddit.group(1));
+                synchronized (this) {
+                    if (expiredOrInvalid()) return;
+                    if (capturedIds.size() + occurrences.size() > MAX_IDS) {
+                        invalid = true;
+                        return;
+                    }
+                    capturedIds.addAll(occurrences);
+                    requests.remove(requestId);
+                }
+                return;
+            }
             JsonNode root = Json.M.readTree(body);
             if (root == null) throw new IllegalStateException("JSON vazio");
             Set<String> found = extractIds(root, state);
@@ -230,7 +354,7 @@ public final class PublishTrace implements AutoCloseable {
                 requests.remove(requestId);
             }
         } catch (Exception e) {
-            markInvalid();
+            markInvalid(e);
         }
     }
 
@@ -245,6 +369,14 @@ public final class PublishTrace implements AutoCloseable {
             return numericId(result.get("rest_id"));
         }
         if (network.equals("pinterest")) return numericId(root.path("resource_response").path("data").get("id"));
+        if (network.equals("ig") && state.path != null
+                && state.path.matches("^/api/v1/web/comments/[0-9]{1,32}/add/?$")) {
+            Set<String> commentIds = new HashSet<>();
+            int[] commentNodes = {0};
+            collect(root, 0, commentNodes, Set.of("id", "pk"), commentIds);
+            commentIds.removeIf(id -> !id.matches("[0-9]{1,32}"));
+            return commentIds;
+        }
         Set<String> allowed = switch (network) {
             case "ig" -> Set.of("media_id", "pk", "code");
             case "tt" -> Set.of("item_id", "aweme_id");
@@ -323,9 +455,10 @@ public final class PublishTrace implements AutoCloseable {
         }
     }
 
-    private boolean allowedHost(String url) {
+    private boolean hostBase(String url) {
         try {
-            URI uri = URI.create(url); String host = uri.getHost(); String path = uri.getPath();
+            URI uri = URI.create(url);
+            String host = uri.getHost();
             if (host == null) return false;
             host = host.toLowerCase(Locale.ROOT);
             String base = switch (network) {
@@ -337,17 +470,31 @@ public final class PublishTrace implements AutoCloseable {
                 case "mastodon" -> "mastodon.social";
                 case "x" -> "x.com";
                 case "pinterest" -> "pinterest.com";
+                case "reddit" -> "reddit.com";
                 default -> "";
             };
-            boolean hostOk = !base.isEmpty() && (host.equals(base) || host.endsWith("." + base)
+            return !base.isEmpty() && (host.equals(base) || host.endsWith("." + base)
                     || (network.equals("bsky") && host.endsWith(".bsky.network"))
                     || (network.equals("x") && (host.equals("twitter.com") || host.endsWith(".twitter.com"))));
-            if (!hostOk) return false;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    private boolean allowedHost(String url) {
+        try {
+            if (!hostBase(url)) return false;
+            URI uri = URI.create(url);
+            String host = uri.getHost();
+            String path = uri.getPath();
+            if (host == null) return false;
+            host = host.toLowerCase(Locale.ROOT);
             return switch (network) {
                 case "bsky" -> path.equals("/xrpc/com.atproto.repo.createRecord") || path.equals("/xrpc/com.atproto.repo.applyWrites");
                 case "mastodon" -> host.equals("mastodon.social") && path.equals("/api/v1/statuses");
                 case "x" -> path.matches("^/i/api/graphql/[A-Za-z0-9_-]+/CreateTweet$");
                 case "pinterest" -> path.equals("/resource/PinResource/create/");
+                case "reddit" -> path.matches("^/svc/shreddit/t[13]_[a-z0-9]{1,16}/create-comment$");
                 default -> true;
             };
         } catch (RuntimeException e) {
@@ -387,6 +534,11 @@ public final class PublishTrace implements AutoCloseable {
 
     private synchronized void markInvalid() { invalid = true; }
 
+    private synchronized void markInvalid(Throwable e) {
+        invalid = true;
+        if (e != null) lastError = e.getClass().getSimpleName();
+    }
+
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
         RuntimeException failure = null;
@@ -394,7 +546,7 @@ public final class PublishTrace implements AutoCloseable {
             try {
                 await(cdp.removeCdpListener(entry.getKey(), entry.getValue()));
             } catch (Exception e) {
-                markInvalid();
+                markInvalid(e);
                 if (failure == null) failure = new IllegalStateException("Falha ao limpar listener CDP", e);
                 else failure.addSuppressed(e);
             }
@@ -419,6 +571,7 @@ public final class PublishTrace implements AutoCloseable {
             case "mastodon" -> "mastodon";
             case "x", "twitter" -> "x";
             case "pinterest" -> "pinterest";
+            case "reddit" -> "reddit";
             default -> throw new IllegalArgumentException("Rede sem suporte para captura de publicacao");
         };
     }

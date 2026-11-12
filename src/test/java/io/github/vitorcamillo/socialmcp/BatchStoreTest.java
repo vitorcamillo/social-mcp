@@ -1048,7 +1048,7 @@ class BatchStoreTest {
         }
         // rede fora da allowlist recusada no opt-in
         IllegalArgumentException rede = assertThrows(IllegalArgumentException.class, () -> bs.draft("rp", Json.parse("["
-                + cap(",\"network\":\"reddit\",\"expect\":\"" + expect + "\",\"responseProof\":true") + "]")));
+                + cap(",\"network\":\"threads\",\"expect\":\"" + expect + "\",\"responseProof\":true") + "]")));
         assertTrue(rede.getMessage().contains("bluesky"), rede.getMessage());
         // flag nao boolean recusada
         assertThrows(IllegalArgumentException.class, () -> bs.draft("rp", Json.parse("["

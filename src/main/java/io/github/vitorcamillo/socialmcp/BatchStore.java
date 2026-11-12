@@ -38,7 +38,7 @@ public class BatchStore {
     static final Set<String> WRITE_METHODS = Set.of("POST", "PUT", "PATCH", "DELETE");
     static final int MAX_BODY_BYTES = 16 * 1024;
     /** Redes com captura passiva de publicacao (PublishTrace). */
-    static final Set<String> RESPONSE_PROOF_NETWORKS = Set.of("ig", "instagram", "tt", "tiktok", "yt", "youtube", "fb", "facebook", "bluesky", "bsky", "mastodon", "x", "twitter", "pinterest");
+    static final Set<String> RESPONSE_PROOF_NETWORKS = Set.of("ig", "instagram", "tt", "tiktok", "yt", "youtube", "fb", "facebook", "bluesky", "bsky", "mastodon", "x", "twitter", "pinterest", "reddit");
     /** expect da prova de resposta: texto aprovado, 8..2200 chars. */
     static final int RESPONSE_PROOF_EXPECT_MIN = 8;
     static final int RESPONSE_PROOF_EXPECT_MAX = 2200;
@@ -654,7 +654,7 @@ public class BatchStore {
             }
             String net = a.path("network").asText("").toLowerCase(java.util.Locale.ROOT);
             if (!RESPONSE_PROOF_NETWORKS.contains(net)) {
-                throw new IllegalArgumentException("acao " + idx + ": capture_ids com responseProof so vale em ig|tt|yt|facebook|bluesky|mastodon|x|pinterest");
+                throw new IllegalArgumentException("acao " + idx + ": capture_ids com responseProof so vale em ig|tt|yt|facebook|bluesky|mastodon|x|pinterest|reddit");
             }
         }
     }

@@ -3,7 +3,9 @@ package io.github.vitorcamillo.socialmcp;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -27,9 +29,11 @@ class PublishTraceTest {
         final CountDownLatch bodyRequested = new CountDownLatch(1);
         volatile JsonNode response = Json.obj().put("body", "{\"media_id\":\"media_123\"}")
                 .put("base64Encoded", false);
+        volatile JsonNode requestPostData = Json.obj().put("postData", "");
         volatile boolean failAdd;
         volatile boolean failRemove;
         volatile boolean failBody;
+        volatile boolean failPostData;
 
         @Override public CompletableFuture<Void> addCdpListener(String event, Consumer<JsonNode> listener) {
             if (failAdd && event.equals("Network.responseReceived")) return failed();
@@ -50,6 +54,10 @@ class PublishTraceTest {
                 if (failBody) return CompletableFuture.failedFuture(new IllegalStateException("fake failure"));
                 return CompletableFuture.completedFuture(response);
             }
+            if (command.equals("Network.getRequestPostData")) {
+                if (failPostData) return CompletableFuture.failedFuture(new IllegalStateException("fake failure"));
+                return CompletableFuture.completedFuture(requestPostData);
+            }
             return CompletableFuture.completedFuture(Json.obj());
         }
 
@@ -66,6 +74,15 @@ class PublishTraceTest {
         void response(String id, int status) {
             emit("Network.responseReceived", "{\"requestId\":\"" + id + "\",\"response\":{\"status\":" + status + "}}");
             emit("Network.loadingFinished", "{\"requestId\":\"" + id + "\"}");
+        }
+        void publicationRequestSemCorpo(String id, String url) {
+            ObjectNode p = Json.obj();
+            p.put("requestId", id);
+            ObjectNode request = p.putObject("request");
+            request.put("url", url);
+            request.put("method", "POST");
+            request.put("hasPostData", true);
+            emit("Network.requestWillBeSent", p.toString());
         }
         boolean awaitBody() throws InterruptedException { return bodyRequested.await(1, TimeUnit.SECONDS); }
     }
@@ -574,6 +591,195 @@ class PublishTraceTest {
 
     @Test
     void rejeitaRedeSemSuporte() {
-        assertThrows(IllegalArgumentException.class, () -> PublishTrace.start(new FakeCdp(), "reddit", TEXT));
+        assertThrows(IllegalArgumentException.class, () -> PublishTrace.start(new FakeCdp(), "linkedin", TEXT));
+    }
+
+    @Test
+    void capturaComentarioReddit() throws Exception {
+        FakeCdp cdp = new FakeCdp();
+        cdp.response = Json.obj().put("body",
+                "<shreddit-comment author=\"x\" thingid=\"t1_zz9yy8\" depth=\"0\">texto</shreddit-comment>")
+                .put("base64Encoded", false);
+        PublishTrace trace = PublishTrace.start(cdp, "reddit", TEXT);
+        String body = "comment="
+                + java.net.URLEncoder.encode(TEXT, java.nio.charset.StandardCharsets.UTF_8);
+        cdp.publicationRequest("r", "https://www.reddit.com/svc/shreddit/t3_abc123/create-comment", "POST", body);
+        cdp.response("r", 200);
+        assertTrue(cdp.awaitBody());
+        waitForId(trace, "zz9yy8");
+        assertEquals(Set.of("zz9yy8"), trace.ids());
+        trace.close();
+    }
+
+    @Test
+    void capturaComentarioRedditComAtributoComplexoEAspasEscapadas() throws Exception {
+        FakeCdp cdp = new FakeCdp();
+        cdp.response = Json.obj().put("body",
+                "<shreddit-comment data-x=\"a>b\" thingid=&quot;t1_19sjd4bep7zgk&quot;>x</shreddit-comment>"
+                        + "<a href=\"/r/c/comments/1xt0g3k/x/19sjd4bep7zgk/\">t1_19sjd4bep7zgk</a>")
+                .put("base64Encoded", false);
+        PublishTrace trace = PublishTrace.start(cdp, "reddit", TEXT);
+        cdp.publicationRequest("r", "https://www.reddit.com/svc/shreddit/t3_1xt0g3k/create-comment", "POST",
+                "comment=" + java.net.URLEncoder.encode(TEXT, java.nio.charset.StandardCharsets.UTF_8));
+        cdp.response("r", 200);
+        assertTrue(cdp.awaitBody());
+        waitForId(trace, "19sjd4bep7zgk");
+        assertEquals(Set.of("19sjd4bep7zgk"), trace.ids());
+        trace.close();
+    }
+
+    @Test
+    void rejeitaEndpointRedditForaDoCreateComment() throws Exception {
+        FakeCdp cdp = new FakeCdp();
+        PublishTrace trace = PublishTrace.start(cdp, "reddit", TEXT);
+        cdp.publicationRequest("e", "https://www.reddit.com/svc/shreddit/events", "POST", "comment=texto%20aprovado");
+        cdp.response("e", 200);
+        assertNadaCapturadoComEventosCompletos(cdp, trace);
+        trace.close();
+    }
+
+    @Test
+    void respostaRedditSemComentarioNaoInvalidaTrace() throws Exception {
+        FakeCdp cdp = new FakeCdp();
+        cdp.response = Json.obj().put("body", "<html><body>ok</body></html>").put("base64Encoded", false);
+        PublishTrace trace = PublishTrace.start(cdp, "reddit", TEXT);
+        cdp.publicationRequest("r", "https://www.reddit.com/svc/shreddit/t1_def456/create-comment", "POST",
+                "comment=texto%20aprovado");
+        cdp.response("r", 200);
+        assertTrue(cdp.awaitBody());
+        Thread.sleep(200);
+        assertTrue(trace.ids().isEmpty());
+        assertThrows(IllegalArgumentException.class, () -> trace.assertMatched("x"));
+        trace.close();
+    }
+
+    @Test
+    void capturaIdDeComentarioInstagram() throws Exception {
+        FakeCdp cdp = new FakeCdp();
+        cdp.response = Json.obj().put("body",
+                "{\"id\":\"18011122233\",\"text\":\"...\",\"from\":{\"pk\":\"555\",\"username\":\"u\"},\"status\":\"ok\"}")
+                .put("base64Encoded", false);
+        PublishTrace trace = PublishTrace.start(cdp, "ig", TEXT);
+        cdp.publicationRequest("c", "https://www.instagram.com/api/v1/web/comments/3123456789/add/",
+                "POST", "comment_text=texto%20aprovado");
+        cdp.response("c", 200);
+        assertTrue(cdp.awaitBody());
+        waitForId(trace, "18011122233");
+        assertTrue(trace.ids().contains("18011122233"));
+        trace.close();
+    }
+
+    @Test
+    void chaveIdForaDoEndpointDeComentarioNaoCapturada() throws Exception {
+        FakeCdp cdp = new FakeCdp();
+        cdp.response = Json.obj().put("body", "{\"id\":\"999\"}").put("base64Encoded", false);
+        PublishTrace trace = PublishTrace.start(cdp, "ig", TEXT);
+        cdp.publicationRequest("o", "https://www.instagram.com/api/v1/media/123/configure/",
+                "POST", "caption=texto%20aprovado");
+        cdp.response("o", 200);
+        assertTrue(cdp.awaitBody());
+        Thread.sleep(200);
+        assertTrue(trace.ids().isEmpty());
+        assertThrows(IllegalArgumentException.class, () -> trace.assertMatched("999"));
+        trace.close();
+    }
+
+    @Test
+    void redditSemPostDataBuscaCorpoViaGetRequestPostData() throws Exception {
+        FakeCdp cdp = new FakeCdp();
+        cdp.requestPostData = Json.obj().put("postData",
+                "------boundary\r\nContent-Disposition: form-data; name=\"comment\"\r\n\r\n" + TEXT + "\r\n------boundary--");
+        cdp.response = Json.obj().put("body",
+                "<shreddit-comment author=\"x\" thingid=\"t1_abc123\" depth=\"0\">texto</shreddit-comment>")
+                .put("base64Encoded", false);
+        PublishTrace trace = PublishTrace.start(cdp, "reddit", TEXT);
+        cdp.publicationRequestSemCorpo("r", "https://www.reddit.com/svc/shreddit/t3_abc123/create-comment");
+        cdp.response("r", 200);
+        assertTrue(cdp.awaitBody());
+        waitForId(trace, "abc123");
+        assertEquals(Set.of("abc123"), trace.ids());
+        trace.close();
+    }
+
+    @Test
+    void redditSemPostDataSemTextoDescartaSemLerResposta() throws Exception {
+        FakeCdp cdp = new FakeCdp();
+        cdp.requestPostData = Json.obj().put("postData", "------boundary\r\noutro conteudo\r\n------boundary--");
+        PublishTrace trace = PublishTrace.start(cdp, "reddit", TEXT);
+        cdp.publicationRequestSemCorpo("r", "https://www.reddit.com/svc/shreddit/t3_abc123/create-comment");
+        cdp.response("r", 200);
+        Thread.sleep(300);
+        assertFalse(cdp.bodyRequested.await(100, TimeUnit.MILLISECONDS),
+                "Network.getResponseBody nao deveria ser chamado");
+        assertTrue(trace.ids().isEmpty());
+        assertThrows(IllegalArgumentException.class, () -> trace.assertMatched("abc123"));
+        trace.close();
+    }
+
+    @Test
+    void redditFalhaEmGetRequestPostDataMantemTraceValidoComErro() throws Exception {
+        FakeCdp cdp = new FakeCdp();
+        cdp.failPostData = true;
+        PublishTrace trace = PublishTrace.start(cdp, "reddit", TEXT);
+        cdp.publicationRequestSemCorpo("r", "https://www.reddit.com/svc/shreddit/t3_abc123/create-comment");
+        cdp.response("r", 200);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        String diag = "";
+        while (System.nanoTime() < deadline) {
+            diag = trace.diagnostico();
+            if (diag.contains("erro=") && !diag.contains("erro=-")) break;
+            Thread.sleep(50);
+        }
+        assertTrue(trace.diagnostico().contains("erro="));
+        assertFalse(trace.diagnostico().contains("erro=-"));
+        assertTrue(trace.ids().isEmpty());
+        assertThrows(IllegalArgumentException.class, () -> trace.assertMatched("x"));
+        trace.close();
+    }
+
+    @Test
+    void redditDiagnosticoRegistraCaminhoComTextoMesmoRejeitado() {
+        FakeCdp cdp = new FakeCdp();
+        PublishTrace trace = PublishTrace.start(cdp, "reddit", TEXT);
+        cdp.publicationRequest("e", "https://www.reddit.com/svc/shreddit/events", "POST", "comment=texto%20aprovado");
+        cdp.response("e", 200);
+        String diag = trace.diagnostico();
+        assertTrue(diag.contains("caminhosComTexto="));
+        assertTrue(diag.contains("/svc/shreddit/events"));
+        assertTrue(diag.contains("caminhoOk=0"));
+        trace.close();
+    }
+
+    @Test
+    void diagnosticoDoFluxoFelizExpoeIdEContador() throws Exception {
+        FakeCdp cdp = new FakeCdp();
+        PublishTrace trace = start(cdp);
+        cdp.publicationRequest("c", "https://www.instagram.com/api/v1/media/123/configure/",
+                "POST", "caption=texto%20aprovado");
+        cdp.response("c", 201);
+        assertTrue(cdp.awaitBody());
+        waitForId(trace, "media_123");
+        String diag = trace.diagnostico();
+        assertTrue(diag.contains("ids="));
+        assertTrue(diag.contains("media_123"));
+        assertTrue(diag.contains("comTexto=1"));
+        trace.close();
+    }
+
+    @TempDir
+    Path tmp;
+
+    @Test
+    void responseProofAceitaRedeReddit() throws Exception {
+        BatchStore bs = new BatchStore(TextGateTest.storeComGate(tmp, "exit 0", 30));
+        String expect = "texto aprovado de teste 123";
+        String captura = "{\"network\":\"reddit\",\"kind\":\"capture_ids\",\"selector\":\"css:article\",\"attr\":\"data-id\","
+                + "\"name\":\"posts\",\"expect\":\"" + expect + "\",\"responseProof\":true}";
+        String digitado = "{\"network\":\"reddit\",\"kind\":\"type\",\"selector\":\"css:textarea\",\"text\":\"" + expect + "\"}";
+        String publica = "{\"network\":\"reddit\",\"kind\":\"click\",\"selector\":\"css:button\"}";
+        String verifica = "{\"network\":\"reddit\",\"kind\":\"verify_new_id\",\"selector\":\"css:article\",\"attr\":\"data-id\","
+                + "\"name\":\"posts\",\"expect\":\"" + expect + "\",\"responseProof\":true}";
+        assertEquals("reddit",
+                bs.validate(Json.parse("[" + captura + "," + digitado + "," + publica + "," + verifica + "]")));
     }
 }

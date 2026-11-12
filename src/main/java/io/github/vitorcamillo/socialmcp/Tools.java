@@ -1231,7 +1231,12 @@ public class Tools {
                     return false;
                 }
             };
-            novo = NewIds.verificar(d::executeScript, NewIds.real(), spec, c.ids(), expect, timeout, correlacao);
+            try {
+                novo = NewIds.verificar(d::executeScript, NewIds.real(), spec, c.ids(), expect, timeout, correlacao);
+            } catch (IllegalStateException e) {
+                throw new IllegalStateException(e.getMessage() + " | trace: " + trace.diagnostico(), e);
+            }
+            out.put("trace", trace.diagnostico());
         } else {
             novo = NewIds.verificar(d::executeScript, NewIds.real(), spec, c.ids(), expect, timeout);
         }
@@ -1860,7 +1865,7 @@ public class Tools {
                           "paths": { "type": "array", "minItems": 2, "maxItems": 10, "items": { "type": "string" }, "description": "set_file: 2..10 caminhos absolutos dentro de defaults.uploadRoots, enviados juntos na ordem" },
                           "text": { "type": "string" },
                           "expect": { "type": "string", "description": "verify_text: substring que deve existir na pagina, ou no texto do elemento quando ha selector (prova de estado: ex. #done-button contem 'Publicar'); verify_attr: valor EXATO do atributo (ex.: 'true'); ate 3 leituras, 1 s entre elas. verify_absent (opcional): so conta elementos cujo texto contem expect (ex.: a linha da lista com o id apagado). wait: espera ate o texto aparecer. verify_new_id (opcional): o texto do ITEM novo (innerText/textContent + alt/aria-label do item e descendentes) precisa conter expect; com responseProof=true, expect do verify e o texto aprovado completo ou trecho dele com ao menos 8 chars" },
-                          "responseProof": { "type": "boolean", "description": "capture_ids/verify_new_id: true = prova de resposta opt-in (ig|tt|yt|facebook|bluesky|mastodon|x|pinterest): capture exige expect 8..2200; verify exige mesmo responseProof e expect igual ou trecho (>= 8 chars); o lote precisa de type ou request POST posterior com o texto exato do capture" },
+                          "responseProof": { "type": "boolean", "description": "capture_ids/verify_new_id: true = prova de resposta opt-in (ig|tt|yt|facebook|bluesky|mastodon|x|pinterest|reddit): capture exige expect 8..2200; verify exige mesmo responseProof e expect igual ou trecho (>= 8 chars); o lote precisa de type ou request POST posterior com o texto exato do capture" },
                           "method": { "type": "string", "description": "request: POST|PUT|PATCH|DELETE (fetch dentro da pagina logada; conta como acao publica)" },
                           "headers": { "type": "object", "description": "request: headers extras literais (cookie proibido: a sessao e a do navegador; token de usuario vai em auth, nunca aqui)" },
                           "body": { "type": "string", "description": "request: corpo ja codificado, ate 16 KiB" },
