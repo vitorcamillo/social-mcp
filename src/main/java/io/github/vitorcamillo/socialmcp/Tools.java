@@ -103,6 +103,7 @@ public class Tools {
                 case "social_screenshot" -> screenshot(args);
                 case "social_draft_batch" -> draftBatch(args);
                 case "social_action" -> action(args);
+                case "social_probe" -> probe(args);
                 case "social_execute_batch" -> executeBatch(args);
                 case "social_set_network_state" -> setNetworkState(args);
                 case "social_journal_tail" -> journalTail(args);
@@ -420,6 +421,143 @@ public class Tools {
         if (!idsNovos.isEmpty()) out.set("idsNovos", idsNovos);
         out.set("passos", results);
         return Json.writePretty(out);
+    }
+
+    /** Passos que a sonda executa: so leitura do inicio da receita, nunca acao. */
+    static boolean probeExecuta(String kind) {
+        return "goto".equals(kind) || "wait".equals(kind) || "verify_text".equals(kind)
+                || "verify_attr".equals(kind) || "capture_ids".equals(kind);
+    }
+
+    /**
+     * social_probe: sonda de receita (so leitura). Executa os passos de leitura do inicio da
+     * acao e confere se o primeiro controle de acao ainda existe na pagina, sem clicar,
+     * digitar, enviar arquivo ou fazer request. Nunca gasta cota publica.
+     */
+    private String probe(JsonNode args) throws Exception {
+        String network = args.path("network").asText("");
+        String action = args.path("action").asText("");
+        requireNetwork(network);
+        JsonNode params = args.path("params");
+        ArrayNode passos = Json.M.createArrayNode();
+        ObjectNode primeiroControle = null;
+        String primeiroSelector = "";
+        String erro = null;
+        boolean trip = false;
+        String padraoTrip = null;
+        String falhaPreparo = null;
+        try {
+            Recipes.Plan plan = null;
+            try {
+                JsonNode p = params;
+                if (p == null || p.isMissingNode() || p.isNull() || (p.isObject() && p.isEmpty())) {
+                    JsonNode recipe = recipes.load(network);
+                    p = RecipeValidator.exemploParams(store, recipe, recipe.path("actions").path(action));
+                }
+                plan = recipes.prepare(network, action, p);
+            } catch (RuntimeException e) {
+                falhaPreparo = String.valueOf(e.getMessage());
+            }
+            String motivo;
+            if (falhaPreparo != null) {
+                motivo = falhaPreparo;
+            } else {
+                String state = store.effectiveState(network);
+                validateActionState(state, true);
+                Guard.Decision dec = Guard.check(store, network, "goto");
+                if (!dec.allowed()) throw new IllegalStateException(dec.reason());
+                int n = 1;
+                for (JsonNode a : plan.steps()) {
+                    String kind = a.path("kind").asText("");
+                    if (!probeExecuta(kind)) {
+                        primeiroControle = Json.obj();
+                        primeiroSelector = a.path("selector").asText("");
+                        primeiroControle.put("passo", n);
+                        primeiroControle.put("kind", kind);
+                        primeiroControle.put("selector", primeiroSelector);
+                        if (primeiroSelector.isBlank()) {
+                            primeiroControle.putNull("presente");
+                        } else {
+                            try {
+                                primeiroControle.put("presente",
+                                        presente(pool.get(network)::executeScript, primeiroSelector));
+                            } catch (InterruptedException ie) {
+                                Thread.currentThread().interrupt();
+                                throw new IllegalStateException(
+                                        "sonda interrompida ao conferir '" + primeiroSelector + "'", ie);
+                            }
+                        }
+                        break;
+                    }
+                    ObjectNode step = passos.addObject();
+                    step.put("passo", n);
+                    step.put("kind", kind);
+                    try {
+                        String info = runStep(network, kind, a, step);
+                        step.put("ok", true);
+                        if (info != null) step.put("info", info);
+                    } catch (Exception e) {
+                        step.put("ok", false);
+                        step.put("erro", String.valueOf(e.getMessage()));
+                        erro = "passo " + n + " falhou: " + e.getMessage();
+                    }
+                    String sample = BrowserPool.visibleText(pool.get(network), 4000);
+                    ObjectNode cfgTw = store.networkCfg(network);
+                    String padraoTw = Guard.tripwireMatch(sample, cfgTw);
+                    String fonteTw = sample;
+                    if (padraoTw == null) {
+                        String snippetTw = step.path("bodySnippet").asText("");
+                        padraoTw = Guard.tripwireMatch(snippetTw, cfgTw);
+                        fonteTw = snippetTw;
+                    }
+                    if (padraoTw != null) {
+                        String contextoTw = Guard.contextoTripwire(fonteTw, padraoTw);
+                        store.setState(network, "cooldown", "padrao de anti-bot na sonda " + action
+                                + " — padrão \"" + padraoTw + "\" em \"" + contextoTw + "\"", "auto");
+                        store.appendJournal("tripwire", network, Json.obj().put("action", action)
+                                .put("padrao", padraoTw).put("contexto", contextoTw));
+                        trip = true;
+                        padraoTrip = padraoTw;
+                        step.put("tripwire", true);
+                        break;
+                    }
+                    if (erro != null) break;
+                    n++;
+                }
+                boolean controleOk =
+                        primeiroControle == null || primeiroControle.path("presente").asBoolean(true);
+                if (trip) {
+                    motivo = "tripwire: " + padraoTrip;
+                } else if (erro != null) {
+                    motivo = erro;
+                } else if (!controleOk) {
+                    motivo = "controle ausente: " + primeiroSelector;
+                } else {
+                    motivo = "receita viva";
+                }
+            }
+            boolean ok = falhaPreparo == null && erro == null && !trip
+                    && (primeiroControle == null || primeiroControle.path("presente").asBoolean(true));
+            store.appendJournal("probe", network,
+                    Json.obj().put("action", action).put("ok", ok).put("motivo", motivo));
+            ObjectNode out = Json.obj();
+            out.put("network", network);
+            out.put("action", action);
+            out.put("ok", ok);
+            out.put("motivo", motivo);
+            out.set("passos", passos);
+            if (primeiroControle != null) out.set("primeiroControle", primeiroControle);
+            else out.putNull("primeiroControle");
+            out.put("tripwire", trip);
+            return Json.writePretty(out);
+        } finally {
+            try {
+                if (store.networkCfg(network).path("closeAfterBatch").asBoolean(true)) {
+                    pool.close(network);
+                }
+            } catch (RuntimeException ignored) {
+            }
+        }
     }
 
     /**
@@ -1708,6 +1846,19 @@ public class Tools {
                     "network": { "type": "string" },
                     "state": { "type": "string", "enum": ["cooldown", "paused"] },
                     "reason": { "type": "string" }
+                  }
+                }
+              },
+              {
+                "name": "social_probe",
+                "description": "Sonda de receita (so leitura): executa os passos de leitura do inicio da acao da receita e confere se o primeiro controle de acao (click/type/set_file) ainda existe na pagina, SEM clicar nem digitar. Nao gasta cota publica. Use antes de rascunhar lote e na checagem diaria de saude.",
+                "inputSchema": {
+                  "type": "object",
+                  "required": ["network", "action"],
+                  "properties": {
+                    "network": { "type": "string" },
+                    "action": { "type": "string" },
+                    "params": { "type": "object" }
                   }
                 }
               },
