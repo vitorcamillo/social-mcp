@@ -100,6 +100,7 @@ public class Tools {
                 case "social_browse" -> browse(args);
                 case "social_read" -> read(args);
                 case "social_inspect" -> inspect(args);
+                case "social_query" -> query(args);
                 case "social_screenshot" -> screenshot(args);
                 case "social_draft_batch" -> draftBatch(args);
                 case "social_action" -> action(args);
@@ -259,6 +260,53 @@ public class Tools {
         ObjectNode out = Controls.sanitizeResult(network, safe(() -> d.getCurrentUrl()), bruto, max);
         store.appendJournal("inspect", network,
                 Json.obj().put("maxControls", max).put("controles", out.path("controles").size()));
+        return Json.writePretty(out);
+    }
+
+    /**
+     * social_query: consulta de DOM so leitura na pagina atual da rede — conta quantos
+     * elementos casam o seletor e devolve atributos-chave e caminho de ancestrais dos
+     * primeiros N. Mesma guarda do social_inspect (nao e acao publica, nao gasta cota,
+     * nao pede aprovacao) e journal analogo. Nunca clica nem le valor de campo.
+     */
+    private String query(JsonNode args) throws Exception {
+        String network = args.path("network").asText("");
+        String selector = args.path("selector").asText("");
+        if (network.isBlank()) throw new IllegalArgumentException("network obrigatoria");
+        if (selector.isBlank()) throw new IllegalArgumentException("selector obrigatorio");
+        int max = 5;
+        if (args.has("max") && args.get("max").isInt()) {
+            max = args.get("max").asInt();
+        }
+        max = Math.min(20, Math.max(1, max));
+        requireNetwork(network);
+        exigirGuarda(network, "goto");
+        JavaDriverless d = pool.get(network);
+        Object raw;
+        try {
+            raw = d.executeScript(ShadowDom.queryScript(selector, max));
+        } catch (Exception e) {
+            throw new IllegalStateException("query falhou no navegador: " + e.getMessage(), e);
+        }
+        JsonNode bruto;
+        try {
+            bruto = Json.parse(raw == null ? "{\"erro\":\"resposta vazia do navegador\"}" : String.valueOf(raw));
+        } catch (RuntimeException e) {
+            bruto = Json.obj().put("erro", "resposta invalida do navegador");
+        }
+        int total = bruto.path("total").asInt(0);
+        ObjectNode out = Json.obj();
+        out.put("network", network);
+        out.put("url", safe(() -> d.getCurrentUrl()));
+        out.put("selector", selector);
+        if (bruto.has("erro")) {
+            out.put("erro", bruto.path("erro").asText(""));
+        } else {
+            out.put("total", total);
+            JsonNode itens = bruto.path("itens");
+            out.set("itens", itens.isArray() ? itens : Json.M.createArrayNode());
+        }
+        store.appendJournal("query", network, Json.obj().put("selector", selector).put("total", total));
         return Json.writePretty(out);
     }
 
@@ -1757,6 +1805,19 @@ public class Tools {
                   "properties": {
                     "network": { "type": "string" },
                     "maxControls": { "type": "integer", "minimum": 1, "maximum": 100, "default": 60 }
+                  }
+                }
+              },
+              {
+                "name": "social_query",
+                "description": "Consulta de DOM so leitura na pagina atual da rede: conta quantos elementos casam o seletor (css:, xpath:, id: ou css com >>> para shadow DOM) e devolve atributos-chave (aria-*, data-testid, href, hidden, slot...) e o caminho de ancestrais dos primeiros N. Nunca clica nem le valor de campo. Use para mapear receita e provar que o controle e unico e preso ao alvo.",
+                "inputSchema": {
+                  "type": "object",
+                  "required": ["network", "selector"],
+                  "properties": {
+                    "network": { "type": "string" },
+                    "selector": { "type": "string" },
+                    "max": { "type": "integer", "minimum": 1, "maximum": 20, "default": 5 }
                   }
                 }
               },

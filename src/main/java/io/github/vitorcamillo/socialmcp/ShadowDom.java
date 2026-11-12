@@ -33,10 +33,44 @@ public final class ShadowDom {
             + "if(!e){return null;}if(i===parts.length-1){return e;}if(!e.shadowRoot){return null;}sc=e.shadowRoot;}return null;}"
             + "function rjAll(sc,parts,i,acc){var es=sc.querySelectorAll(parts[i]);for(var k=0;k<es.length;k++){"
             + "if(i===parts.length-1){acc.push(es[k]);}else if(es[k].shadowRoot){rjAll(es[k].shadowRoot,parts,i+1,acc);}}return acc;}"
-            + "function rjCount(doc,parts,xp,expect){var els=[];if(xp!==null){var r=doc.evaluate(xp,doc,null,7,null);"
-            + "for(var i=0;i<r.snapshotLength;i++){els.push(r.snapshotItem(i));}}else{rjAll(doc,parts,0,els);}"
+            + "function rjEls(doc,parts,xp){var els=[];if(xp!==null){var r=doc.evaluate(xp,doc,null,7,null);"
+            + "for(var i=0;i<r.snapshotLength;i++){els.push(r.snapshotItem(i));}}else{rjAll(doc,parts,0,els);}return els;}"
+            + "function rjCount(doc,parts,xp,expect){var els=rjEls(doc,parts,xp);"
             + "if(!expect){return els.length;}var n=0;for(var j=0;j<els.length;j++){"
-            + "if(String(els[j].innerText||els[j].textContent||'').indexOf(expect)>=0){n++;}}return n;}";
+            + "if(String(els[j].innerText||els[j].textContent||'').indexOf(expect)>=0){n++;}}return n;}"
+            + "function rjTx(el){var tn=String(el.tagName||'').toUpperCase();"
+            + "if(tn==='INPUT'||tn==='TEXTAREA'||tn==='SELECT'||(el.hasAttribute&&el.hasAttribute('contenteditable'))){return '';}"
+            + "var s=String(el.innerText||el.textContent||'');s=s.replace(/\\s+/g,' ').trim();return s.substring(0,160);}"
+            + "function rjSens(el){var gt=function(k){return el.getAttribute?el.getAttribute(k)||'':'';};"
+            + "if(String(gt('type')).toLowerCase()==='password'){return true;}"
+            + "var ac=String(gt('autocomplete')).toLowerCase();"
+            + "return ac.indexOf('password')>=0||ac.indexOf('cc-')>=0;}"
+            + "function rjRot(no){var t=String(no.tagName||'').toLowerCase();"
+            + "var g=function(k){return no.getAttribute?no.getAttribute(k):null;};"
+            + "var dt=g('data-testid');if(dt){return t+'[data-testid='+String(dt).substring(0,60)+']';}"
+            + "var id=g('id');if(id){return t+'#'+id;}"
+            + "var rl=g('role');if(rl){return t+'[role='+rl+']';}return t;}"
+            + "function rjCam(el){var c=[];var no=el.parentNode;var v=0;"
+            + "while(no&&c.length<5&&v<30){v++;"
+            + "if(no.nodeType===11&&no.host){c.push('#shadow('+String(no.host.tagName||'?').toLowerCase()+')');no=no.host;}"
+            + "else if(no.nodeType===1&&no.tagName){c.push(rjRot(no));no=no.parentNode;}"
+            + "else{no=no.parentNode;}}return c.join(' < ');}"
+            + "function rjAt(el){var at={};"
+            + "var fix=['id','role','aria-label','aria-pressed','aria-checked','aria-expanded','aria-hidden',"
+            + "'aria-selected','data-testid','href','hidden','slot','type','name','title','disabled','class'];"
+            + "for(var f=0;f<fix.length;f++){var k=fix[f];"
+            + "if(el.hasAttribute&&el.hasAttribute(k)){var w=el.getAttribute(k);if(w===null){w='';}w=String(w);"
+            + "if(k==='class'){w=w.substring(0,80);}at[k]=w;}}"
+            + "if(el.attributes){var nd=0;for(var a=0;a<el.attributes.length&&nd<12;a++){"
+            + "var an=el.attributes[a].name;"
+            + "if(an&&an.indexOf('data-')===0&&!Object.prototype.hasOwnProperty.call(at,an)){"
+            + "var av=String(el.getAttribute(an)||'');at[an]=av.substring(0,120);nd++;}}}return at;}"
+            + "function rjQuery(doc,parts,xp,max){try{var els=rjEls(doc,parts,xp);var total=els.length;var itens=[];"
+            + "for(var i=0;i<els.length&&itens.length<max;i++){var el=els[i];try{"
+            + "if(rjSens(el)){continue;}"
+            + "itens.push({tag:String(el.tagName||'').toLowerCase(),texto:rjTx(el),attrs:rjAt(el),caminho:rjCam(el)});"
+            + "}catch(s){}}return JSON.stringify({total:total,itens:itens});}"
+            + "catch(e){return JSON.stringify({erro:String((e&&e.message)||e)});}}";
 
     /** Texto visivel: body.innerText + innerText dos filhos de cada shadow root aberto. */
     public static String textScript() {
@@ -63,6 +97,25 @@ public final class ShadowDom {
      * vazio nao pode virar consulta CSS de {@code undefined} e "provar" uma ausencia.
      */
     public static String countScript(String selector, String expect) {
+        Sel s = traduzir(selector);
+        return "(function(){" + LIB + "return rjCount(document," + Json.write(s.parts) + ","
+                + (s.xp == null ? "null" : Json.write(TextNode.valueOf(s.xp))) + ","
+                + Json.write(TextNode.valueOf(expect == null ? "" : expect)) + ");})()";
+    }
+
+    /** Seletor traduzido para o JS: partes css (>>> resolvido) ou xpath; id: vira [id=...]. */
+    private static final class Sel {
+        final ArrayNode parts;
+        final String xp;
+
+        Sel(ArrayNode parts, String xp) {
+            this.parts = parts;
+            this.xp = xp;
+        }
+    }
+
+    /** Mesma traducao de seletor do countScript (xpath:/id:/css:/>>>); xpath: vazio e erro. */
+    private static Sel traduzir(String selector) {
         String xp = null;
         ArrayNode parts = Json.M.createArrayNode();
         if (selector.startsWith("xpath:")) {
@@ -77,9 +130,20 @@ public final class ShadowDom {
             if (ps == null) ps = List.of(selector.startsWith("css:") ? selector.substring(4) : selector);
             ps.forEach(parts::add);
         }
-        return "(function(){" + LIB + "return rjCount(document," + Json.write(parts) + ","
-                + (xp == null ? "null" : Json.write(TextNode.valueOf(xp))) + ","
-                + Json.write(TextNode.valueOf(expect == null ? "" : expect)) + ");})()";
+        return new Sel(parts, xp);
+    }
+
+    /**
+     * Consulta de DOM so leitura: JSON (string) {total, itens} com ate max itens
+     * {tag, texto, attrs, caminho}. Mesma traducao de seletor do countScript.
+     * Nunca le valor digitado (input/textarea/select/contenteditable tem texto="")
+     * e item sensivel (type=password ou autocomplete com password/cc-) sai do
+     * detalhe (mas conta no total). Erro de JS vira {erro:...}.
+     */
+    public static String queryScript(String selector, int max) {
+        Sel s = traduzir(selector);
+        return "(function(){" + LIB + "return rjQuery(document," + Json.write(s.parts) + ","
+                + (s.xp == null ? "null" : Json.write(TextNode.valueOf(s.xp))) + "," + max + ");})()";
     }
 
     /**
