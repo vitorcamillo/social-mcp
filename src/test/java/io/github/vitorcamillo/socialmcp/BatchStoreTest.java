@@ -8,7 +8,10 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -1261,6 +1264,52 @@ class BatchStoreTest {
         p = Json.parse(Files.readString(provas));
         assertFalse(p.path("bluesky").has(id2));
         assertEquals(id, p.path("bluesky").path("create_post").asText());
+    }
+
+    @Test
+    void promoverProvasConcorrentesDeRedesDiferentesNaoPerdeEntradas() throws Exception {
+        Store s = store();
+        int n = 8;
+        ObjectNode origem = Json.obj().put("receita", "create_post").put("provada", true);
+        List<String> ids = new ArrayList<>();
+        List<String> nets = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            String net = "rede" + i;
+            String acoesRede = "[{\"network\":\"" + net + "\",\"kind\":\"click\",\"selector\":\"css:button\"}]";
+            String id = new BatchStore(s).draft("promover " + net, Json.parse(acoesRede), origem).get("id").asText();
+            new BatchStore(s).approve(id, "humano", "ok");
+            ids.add(id);
+            nets.add(net);
+        }
+        CountDownLatch vai = new CountDownLatch(1);
+        AtomicReference<Throwable> falha = new AtomicReference<>();
+        List<Thread> threads = new ArrayList<>();
+        for (String id : ids) {
+            Thread t = new Thread(() -> {
+                try {
+                    vai.await();
+                    new BatchStore(s).markExecuted(id, Json.obj().put("conferencia", "forte"));
+                } catch (Throwable e) {
+                    falha.compareAndSet(null, e);
+                }
+            });
+            threads.add(t);
+            t.start();
+        }
+        vai.countDown();
+        for (Thread t : threads) {
+            t.join(10_000);
+            assertFalse(t.isAlive(), "thread de markExecuted nao terminou");
+        }
+        assertNull(falha.get(), () -> "markExecuted concorrente falhou: " + falha.get());
+        Path provas = s.batchesDir().getParent().resolve("provas.json");
+        JsonNode p = Json.parse(Files.readString(provas));
+        for (int i = 0; i < n; i++) {
+            assertEquals(ids.get(i), p.path(nets.get(i)).path("create_post").asText(), nets.get(i));
+        }
+        try (var stream = Files.list(provas.getParent())) {
+            assertTrue(stream.noneMatch(x -> x.getFileName().toString().endsWith(".tmp")), "sem tmp residual");
+        }
     }
 
     @Test

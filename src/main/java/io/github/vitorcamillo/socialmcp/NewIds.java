@@ -299,9 +299,10 @@ final class NewIds {
     }
 
     /**
-     * Espera um item novo com correlacao externa (ex.: trace de publicacao): o candidato
-     * so entra em novos quando id novo + texto expect + predicate true. Predicate falso
-     * apenas pula o candidato; excecao de estado invalido do predicate aborta fail-fast.
+     * Espera um item novo com correlacao externa (ex.: trace de publicacao): a correlacao
+     * so escolhe o id comprovado entre os novos compativeis com o texto; {@code outros}
+     * conta todos esses compativeis (antes da correlacao). Predicate falso apenas pula o
+     * candidato na escolha; excecao de estado invalido do predicate aborta fail-fast.
      */
     static Novo verificar(Function<String, Object> exec, Relogio r, Spec s, Set<String> antes,
                           String expect, long timeoutMs, Predicate<String> correlacao) throws InterruptedException {
@@ -330,7 +331,7 @@ final class NewIds {
             }
             vistos = l.itens().size();
             int ancoras = 0;
-            Map<String, String> novos = new LinkedHashMap<>();
+            Map<String, String> compativeis = new LinkedHashMap<>();
             for (Item item : l.itens()) {
                 String id = idDoItem(s, item, re);
                 if (id == null) continue;
@@ -339,14 +340,19 @@ final class NewIds {
                     continue;
                 }
                 if (comTexto && !normEspacos(item.texto()).contains(expectNorm)) continue;
-                if (correlacao != null && !correlacao.test(id)) continue;
-                novos.putIfAbsent(id, item.texto() != null ? item.texto() : "");
+                compativeis.putIfAbsent(id, item.texto() != null ? item.texto() : "");
+            }
+            Map.Entry<String, String> escolhido = null;
+            for (Map.Entry<String, String> e : compativeis.entrySet()) {
+                if (correlacao == null || correlacao.test(e.getKey())) {
+                    escolhido = e;
+                    break;
+                }
             }
             conhecidos = ancoras;
-            if (!novos.isEmpty()) {
+            if (escolhido != null) {
                 if (antes.isEmpty() || ancoras > 0) {
-                    Map.Entry<String, String> primeiro = novos.entrySet().iterator().next();
-                    return new Novo(primeiro.getKey(), novos.size() - 1, ancoras, primeiro.getValue());
+                    return new Novo(escolhido.getKey(), compativeis.size() - 1, ancoras, escolhido.getValue());
                 }
                 candidatoSemAncora = true;
             }

@@ -1532,8 +1532,9 @@ public class BatchStore {
 
     /**
      * Lote nascido de receita com conferencia forte prova a receita: grava network -> receita -> id
-     * em provas.json (le-altera-escreve; provas.json.tmp + move atomico). Falha de I/O nao derruba
-     * o markExecuted: vira evento receita_provada_falhou no journal e a execucao segue.
+     * em provas.json (le-altera-escreve sob trava entre processos; tmp exclusivo + move atomico).
+     * Falha de I/O nao derruba o markExecuted: vira evento receita_provada_falhou no journal e a
+     * execucao segue.
      */
     private void promoverProva(String id, JsonNode b, JsonNode summary, String net) {
         String receita = b.path("origem").path("receita").asText("");
@@ -1541,20 +1542,26 @@ public class BatchStore {
         try {
             if (net == null || net.isBlank()) return;
             Path provas = store.batchesDir().getParent().resolve("provas.json");
-            ObjectNode raiz = Json.obj();
-            if (Files.isRegularFile(provas)) {
-                JsonNode lido = Json.parse(Files.readString(provas, StandardCharsets.UTF_8));
-                if (lido.isObject()) raiz = (ObjectNode) lido;
-            }
-            JsonNode redeNode = raiz.get(net);
-            ObjectNode rede = redeNode != null && redeNode.isObject() ? (ObjectNode) redeNode : raiz.putObject(net);
-            rede.put(receita, id);
-            Path tmp = provas.resolveSibling("provas.json.tmp");
-            Files.writeString(tmp, Json.writePretty(raiz), StandardCharsets.UTF_8);
-            try {
-                Files.move(tmp, provas, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException e) {
-                Files.move(tmp, provas, StandardCopyOption.REPLACE_EXISTING);
+            try (Store.Trava ignored = store.lock("provas")) {
+                ObjectNode raiz = Json.obj();
+                if (Files.isRegularFile(provas)) {
+                    JsonNode lido = Json.parse(Files.readString(provas, StandardCharsets.UTF_8));
+                    if (lido.isObject()) raiz = (ObjectNode) lido;
+                }
+                JsonNode redeNode = raiz.get(net);
+                ObjectNode rede = redeNode != null && redeNode.isObject() ? (ObjectNode) redeNode : raiz.putObject(net);
+                rede.put(receita, id);
+                Path tmp = Files.createTempFile(provas.getParent(), "provas-", ".tmp");
+                try {
+                    Files.writeString(tmp, Json.writePretty(raiz), StandardCharsets.UTF_8);
+                    try {
+                        Files.move(tmp, provas, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                    } catch (AtomicMoveNotSupportedException e) {
+                        Files.move(tmp, provas, StandardCopyOption.REPLACE_EXISTING);
+                    }
+                } finally {
+                    Files.deleteIfExists(tmp);
+                }
             }
             store.appendJournal("receita_provada", net, Json.obj().put("receita", receita).put("batchId", id));
         } catch (IOException | RuntimeException e) {

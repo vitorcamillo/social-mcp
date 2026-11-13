@@ -455,6 +455,16 @@ class NewIdsTest {
     }
 
     @Test
+    void verificarOutrosContaCandidatosComMesmoTextoAntesDaCorrelacao() throws Exception {
+        // dois ids novos com o mesmo texto; o trace so capturou "c": "b" continua outro candidato
+        String r = "{\"p\":-1,\"it\":[{\"v\":[\"a\"],\"t\":\"x\"},{\"v\":[\"b\"],\"t\":\"oi\"},{\"v\":[\"c\"],\"t\":\"oi\"}]}";
+        NewIds.Novo n = NewIds.verificar(new Fila().add(r),
+                new RelogioFake(), spec("css:article"), Set.of("a"), "oi", 5_000, id -> id.equals("c"));
+        assertEquals("c", n.id(), "correlacao escolhe o id comprovado");
+        assertEquals(1, n.outros(), "b tem o mesmo texto e e novo: conta como outro mesmo sem correlacao");
+    }
+
+    @Test
     void normEspacosColapsaEspacosERemoveLarguraZero() {
         assertEquals("a b c d", NewIds.normEspacos("a\n\n b c\u200b d "));
         assertEquals("", NewIds.normEspacos(null));
