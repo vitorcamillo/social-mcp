@@ -621,8 +621,9 @@ public class Tools {
 
     /**
      * social_find_duplicates: somente leitura, sem cota. Lista os posts do perfil
-     * (receita list_posts), abre cada um, tira o texto de interface comum e agrupa
-     * legendas parecidas (Jaccard de shingles). Nunca clica, digita ou publica.
+     * (receita list_posts — OBRIGATORIAMENTE readOnly), abre cada um, tira o texto de
+     * interface comum e agrupa legendas parecidas (Jaccard de shingles). Nunca clica,
+     * digita ou publica.
      */
     private String findDuplicates(JsonNode args) throws Exception {
         String network = args.path("network").asText("");
@@ -633,6 +634,12 @@ public class Tools {
         if (Double.isNaN(limiar)) limiar = 0.6;
         limiar = Math.min(0.95, Math.max(0.3, limiar));
         Recipes.Plan plan = recipes.prepare(network, "list_posts", Json.obj());
+        if (!plan.readOnly()) {
+            // runReadOnly executa os passos na hora: sem essa recusa, uma receita list_posts
+            // sem readOnly rodaria cliques/requests sem lote, aprovacao ou guarda publica
+            throw new IllegalStateException("receita list_posts de '" + network + "' nao declara readOnly:"
+                    + " social_find_duplicates so executa receita de leitura");
+        }
         validateActionState(store.effectiveState(network), true);
         JsonNode lista = Json.parse(runReadOnly(plan));
         if (!lista.path("ok").asBoolean(false)) {
@@ -1071,6 +1078,22 @@ public class Tools {
         return true;
     }
 
+    /**
+     * No aborto com passo publico feito e nenhum envio identificado, o envio pode ter sido um
+     * passo publico ANTERIOR ao escolhido pela heuristica de ehEnvio: sem marcacao explicita
+     * "envio" ela so aposta que o ULTIMO passo publico e o envio, e um envio seguido de outro
+     * passo publico (ex.: clique de fechar depois do Publicar) quebra a aposta. Com 2+ passos
+     * publicos sem marcacao, classificar o aborto como se o envio pudesse ter acontecido.
+     */
+    static boolean envioPodeSerPassoAnterior(JsonNode actions) {
+        int publicos = 0;
+        for (JsonNode a : actions) {
+            if (a.has("envio")) return false; // declaracao explicita em qualquer passo: so o marcado e envio
+            if (Guard.isPublic(a.path("kind").asText(""))) publicos++;
+        }
+        return publicos >= 2;
+    }
+
     /** Conferencia do resultado: a estatica do lote se rodou inteiro; senao, o que se sabe do aborto. */
     static String conferenciaFinal(JsonNode actions, boolean abortado, boolean publicoFeito) {
         return conferenciaFinal(actions, abortado, publicoFeito, publicoFeito, false, false);
@@ -1079,8 +1102,9 @@ public class Tools {
     /**
      * Conferencia com o que a execucao aprendeu: duplicata suspeita vence tudo (possivel publicacao
      * em dobro); aborto DEPOIS do envio segue abortado_apos_publico (scripts externos leem esse
-     * texto), aborto ANTES do envio e novo; prova forte cujo texto exibido nao cobriu o digitado
-     * inteiro cai para fraca.
+     * texto), aborto ANTES do envio e novo — mas com 2+ passos publicos sem marcacao explicita o
+     * envio pode ter sido um passo anterior (envioPodeSerPassoAnterior) e o aborto e classificado
+     * como apos publico; prova forte cujo texto exibido nao cobriu o digitado inteiro cai para fraca.
      */
     static String conferenciaFinal(JsonNode actions, boolean abortado, boolean publicoFeito,
                                    boolean envioFeito, boolean duplicataSuspeita, boolean textoDivergente) {
@@ -1088,7 +1112,10 @@ public class Tools {
         if (!publicoFeito) {
             return BatchStore.CONF_SEM_PUBLICO.equals(BatchStore.conferencia(actions)) ? BatchStore.CONF_SEM_PUBLICO : CONF_NADA_PUBLICO;
         }
-        if (abortado) return envioFeito ? CONF_ABORTADO_APOS_PUBLICO : CONF_ABORTADO_ANTES_ENVIO;
+        if (abortado) {
+            return envioFeito || envioPodeSerPassoAnterior(actions)
+                    ? CONF_ABORTADO_APOS_PUBLICO : CONF_ABORTADO_ANTES_ENVIO;
+        }
         String base = BatchStore.conferencia(actions);
         if (BatchStore.CONF_FORTE.equals(base) && textoDivergente) return BatchStore.CONF_FRACA;
         return base;

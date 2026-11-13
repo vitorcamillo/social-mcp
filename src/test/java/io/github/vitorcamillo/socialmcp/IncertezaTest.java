@@ -133,6 +133,48 @@ class IncertezaTest {
     }
 
     @Test
+    void envioSeguidoDeOutroPublicoNoAbortoEClassificadoConservadoramente() {
+        // publicar funcionou e o clique seguinte falhou ANTES de agir: sem envio identificado,
+        // o envio pode ter sido o clique anterior — conservador, trava a rede
+        JsonNode actions = Json.parse("""
+                [{"kind":"click","selector":"css:composer"},
+                 {"kind":"type","text":"oi"},
+                 {"kind":"click","selector":"css:publicar"},
+                 {"kind":"click","selector":"css:fechar"},
+                 {"kind":"verify_new_id","name":"p"}]
+                """);
+        assertTrue(Tools.envioPodeSerPassoAnterior(actions));
+        assertEquals(Tools.CONF_ABORTADO_APOS_PUBLICO,
+                Tools.conferenciaFinal(actions, true, true, false, false, false));
+        assertTrue(Store.CONFERENCIAS_INCERTAS.contains(Tools.CONF_ABORTADO_APOS_PUBLICO),
+                "abortado_apos_publico trava a rede ate social_resolve_incerteza");
+        // envio identificado segue igual
+        assertEquals(Tools.CONF_ABORTADO_APOS_PUBLICO,
+                Tools.conferenciaFinal(actions, true, true, true, false, false));
+    }
+
+    @Test
+    void envioExplicitoOuUnicoPublicoMantemAbortoAntesDoEnvio() {
+        // com envio declarado, so o marcado e envio: heuristica desligada
+        JsonNode comFlag = Json.parse("""
+                [{"kind":"click","selector":"css:publicar","envio":true},
+                 {"kind":"click","selector":"css:fechar"},
+                 {"kind":"verify_new_id","name":"p"}]
+                """);
+        assertFalse(Tools.envioPodeSerPassoAnterior(comFlag));
+        assertEquals(Tools.CONF_ABORTADO_ANTES_ENVIO,
+                Tools.conferenciaFinal(comFlag, true, true, false, false, false));
+        // um unico passo publico: o envio so pode ser ele
+        JsonNode unico = Json.parse("""
+                [{"kind":"click","selector":"css:publicar"},
+                 {"kind":"verify_new_id","name":"p"}]
+                """);
+        assertFalse(Tools.envioPodeSerPassoAnterior(unico));
+        assertEquals(Tools.CONF_ABORTADO_ANTES_ENVIO,
+                Tools.conferenciaFinal(unico, true, true, false, false, false));
+    }
+
+    @Test
     void avisoConferenciaCobreOsCasosNovos() {
         assertTrue(Tools.avisoConferencia(Tools.CONF_DUPLICATA_SUSPEITA).contains("social_resolve_incerteza"));
         assertTrue(Tools.avisoConferencia(Tools.CONF_ABORTADO_ANTES_ENVIO).contains("rascunho ou composer"));

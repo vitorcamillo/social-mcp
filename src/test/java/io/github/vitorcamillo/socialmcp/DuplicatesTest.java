@@ -104,4 +104,31 @@ class DuplicatesTest {
         assertEquals(List.of("https://rede/a", "https://rede/c"), grupos.get(0).urls());
         assertEquals(1.0, grupos.get(0).similaridade());
     }
+
+    @Test
+    void legendasExatamenteIguaisEmDuasPaginasAchamDuplicata() {
+        // legenda IDÊNTICA (byte a byte) em 2 páginas: a linha comum era conteúdo,
+        // não interface — remover tudo deixava a busca com zero duplicatas
+        String legenda = "Promocao de lancamento so ate sexta com frete gratis para todo o Brasil";
+        List<Duplicates.Pagina> paginas = List.of(
+                new Duplicates.Pagina("https://rede/a", legenda + INTERFACE),
+                new Duplicates.Pagina("https://rede/b", legenda + INTERFACE));
+        List<Duplicates.Grupo> grupos = Duplicates.agrupar(paginas, 0.6);
+        assertEquals(1, grupos.size());
+        assertEquals(List.of("https://rede/a", "https://rede/b"), grupos.get(0).urls());
+        assertEquals(1.0, grupos.get(0).similaridade());
+    }
+
+    @Test
+    void legendasExatamenteIguaisNasTresPaginasAchamDuplicata() {
+        String legenda = "Arrasta e ve: sao so tres passos para garantir seu ingresso sem fila";
+        List<Duplicates.Pagina> paginas = List.of(
+                new Duplicates.Pagina("https://rede/1", legenda + INTERFACE),
+                new Duplicates.Pagina("https://rede/2", legenda + INTERFACE),
+                new Duplicates.Pagina("https://rede/3", legenda + INTERFACE));
+        List<Duplicates.Grupo> grupos = Duplicates.agrupar(paginas, 0.6);
+        assertEquals(1, grupos.size());
+        assertEquals(List.of("https://rede/1", "https://rede/2", "https://rede/3"), grupos.get(0).urls());
+        assertEquals(1.0, grupos.get(0).similaridade());
+    }
 }

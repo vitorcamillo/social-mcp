@@ -18,6 +18,9 @@ public final class Duplicates {
     public record Pagina(String url, String texto) {}
     public record Grupo(double similaridade, List<String> urls, List<String> inicios) {}
 
+    /** Minimo de palavras para uma pagina entrar na comparacao (elegivel em agrupar). */
+    static final int MIN_PALAVRAS_COMPARAVEL = 5;
+
     static List<String> semInterfaceComum(List<String> textos) {
         int n = textos == null ? 0 : textos.size();
         List<List<String>> linhasPorPagina = new ArrayList<>(n);
@@ -56,6 +59,22 @@ public final class Duplicates {
             }
             out.add(String.join("\n", resto));
         }
+        // Legenda EXATAMENTE igual em todas as paginas e conteudo, nao interface: se a remocao
+        // apagou o texto comparavel de toda pagina substancial, as paginas sao praticamente
+        // identicas — devolver o texto original para a comparacao (senao a busca devolve zero
+        // duplicatas). Interface de verdade sobrevive ao corte em paginas com conteudo proprio.
+        boolean tinhaConteudo = false;
+        boolean sobrouConteudo = false;
+        for (int i = 0; i < n; i++) {
+            String original = textos.get(i) == null ? "" : textos.get(i);
+            if (contaPalavras(normalizar(original)) >= MIN_PALAVRAS_COMPARAVEL) tinhaConteudo = true;
+            if (contaPalavras(normalizar(out.get(i))) >= MIN_PALAVRAS_COMPARAVEL) sobrouConteudo = true;
+        }
+        if (tinhaConteudo && !sobrouConteudo) {
+            List<String> originais = new ArrayList<>(n);
+            for (String texto : textos) originais.add(texto == null ? "" : texto);
+            return originais;
+        }
         return out;
     }
 
@@ -83,6 +102,11 @@ public final class Duplicates {
         return out;
     }
 
+    /** Palavras de um texto ja normalizado (mesmo corte de elegibilidade de agrupar). */
+    private static int contaPalavras(String normalizado) {
+        return normalizado.isEmpty() ? 0 : normalizado.split("\\s+").length;
+    }
+
     static double jaccard(Set<String> a, Set<String> b) {
         boolean aVazio = a == null || a.isEmpty();
         boolean bVazio = b == null || b.isEmpty();
@@ -108,8 +132,8 @@ public final class Duplicates {
         for (int i = 0; i < n; i++) {
             String norm = normalizar(restantes.get(i));
             shinglesPorPagina.add(shingles(norm));
-            int palavras = norm.isEmpty() ? 0 : norm.split("\\s+").length;
-            if (palavras >= 5) elegiveis.add(i);
+            int palavras = contaPalavras(norm);
+            if (palavras >= MIN_PALAVRAS_COMPARAVEL) elegiveis.add(i);
         }
         double[][] sim = new double[n][n];
         int[] pai = new int[n];

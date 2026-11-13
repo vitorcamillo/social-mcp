@@ -152,6 +152,29 @@ class RecipeTest {
     }
 
     @Test
+    void findDuplicatesRecusaReceitaListPostsSemReadOnly() throws Exception {
+        Store s = TextGateTest.storeComGate(tmp, "exit 0", 30);
+        Path dir = s.home.resolve("recipes");
+        Files.createDirectories(dir);
+        // list_posts SEM readOnly (com passo publico): prepare aceita, a tool tem que recusar
+        Files.writeString(dir.resolve("pinterest.json"), """
+                {"network":"pinterest","actions":{
+                  "list_posts":{"params":[],"steps":[
+                    {"kind":"goto","url":"https://br.pinterest.com/"},
+                    {"kind":"click","selector":"css:button[data-test-id=ver-mais]"}]}}}
+                """);
+        assertFalse(new Recipes(s).prepare("pinterest", "list_posts", Json.obj()).readOnly());
+        Tools t = new Tools(s);
+        try {
+            IllegalStateException e = assertThrows(IllegalStateException.class, () -> t.call(
+                    "social_find_duplicates", Json.parse("{\"network\":\"pinterest\"}")));
+            assertTrue(e.getMessage().contains("readOnly"), e.getMessage());
+        } finally {
+            t.shutdown();
+        }
+    }
+
+    @Test
     void acaoPublicaViraRascunhoViaTool() throws Exception {
         Store s = storeComReceita();
         Tools t = new Tools(s);
