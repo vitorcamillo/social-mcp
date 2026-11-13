@@ -131,4 +131,22 @@ class DuplicatesTest {
         assertEquals(List.of("https://rede/1", "https://rede/2", "https://rede/3"), grupos.get(0).urls());
         assertEquals(1.0, grupos.get(0).similaridade());
     }
+
+    @Test
+    void legendaIgualComContadoresDiferentesAchaDuplicata() {
+        List<Duplicates.Grupo> g = Duplicates.agrupar(List.of(
+                new Duplicates.Pagina("https://a", "Promocao de lancamento com frete gratis\nCurtir\n1"),
+                new Duplicates.Pagina("https://b", "Promocao de lancamento com frete gratis\nCurtir\n2")), 0.6);
+        assertEquals(1, g.size());
+        assertEquals(List.of("https://a", "https://b"), g.get(0).urls());
+    }
+
+    @Test
+    void linhaLongaComumNuncaViraInterface() {
+        List<String> r = Duplicates.semInterfaceComum(List.of(
+                "Legenda longa repetida em todos os posts\nCurtir",
+                "Legenda longa repetida em todos os posts\nCurtir"));
+        assertEquals(List.of("Legenda longa repetida em todos os posts",
+                "Legenda longa repetida em todos os posts"), r);
+    }
 }

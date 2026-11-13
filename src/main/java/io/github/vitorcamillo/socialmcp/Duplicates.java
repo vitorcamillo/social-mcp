@@ -41,14 +41,16 @@ public final class Duplicates {
         }
         Set<String> comum = new HashSet<>();
         for (Map.Entry<String, Integer> e : paginasComLinha.entrySet()) {
+            // Interface = linha CURTA (rotulo, contador, @ da conta). Linha com
+            // MIN_PALAVRAS_COMPARAVEL palavras ou mais e legenda/conteudo: nunca sai, senao duas
+            // paginas com a mesma legenda perdem justamente o texto que as torna duplicadas.
+            if (contaPalavras(normalizar(e.getKey())) >= MIN_PALAVRAS_COMPARAVEL) continue;
             int count = e.getValue();
             if (n >= 3) {
-                // Interface = maioria das páginas E pelo menos 4 (ou todas, se houver menos):
-                // senão uma legenda duplicada em 2 de 3 posts seria tomada por interface e sumiria.
                 int minimo = Math.min(n, Math.max(4, n / 2 + 1));
                 if (count >= minimo) comum.add(e.getKey());
-            } else {
-                if (count == n) comum.add(e.getKey());
+            } else if (count == n) {
+                comum.add(e.getKey());
             }
         }
         List<String> out = new ArrayList<>(n);
@@ -58,29 +60,6 @@ public final class Duplicates {
                 if (!comum.contains(s)) resto.add(s);
             }
             out.add(String.join("\n", resto));
-        }
-        // Legenda EXATAMENTE igual em todas as paginas e conteudo, nao interface: se a remocao
-        // apagou o texto comparavel de toda pagina substancial, as paginas sao praticamente
-        // identicas — devolver o texto original para a comparacao (senao a busca devolve zero
-        // duplicatas). Interface de verdade sobrevive ao corte em paginas com conteudo proprio.
-        // So vale com originais (normalizados) identicos: legendas distintas curtas apos o corte
-        // nao sao conteudo comum apagado, e sim o resto certo de cada pagina.
-        boolean tinhaConteudo = false;
-        boolean sobrouConteudo = false;
-        boolean originaisIguais = n > 0;
-        String primeiraNorm = null;
-        for (int i = 0; i < n; i++) {
-            String original = textos.get(i) == null ? "" : textos.get(i);
-            String normOriginal = normalizar(original);
-            if (primeiraNorm == null) primeiraNorm = normOriginal;
-            else if (!primeiraNorm.equals(normOriginal)) originaisIguais = false;
-            if (contaPalavras(normOriginal) >= MIN_PALAVRAS_COMPARAVEL) tinhaConteudo = true;
-            if (contaPalavras(normalizar(out.get(i))) >= MIN_PALAVRAS_COMPARAVEL) sobrouConteudo = true;
-        }
-        if (tinhaConteudo && !sobrouConteudo && originaisIguais) {
-            List<String> originais = new ArrayList<>(n);
-            for (String texto : textos) originais.add(texto == null ? "" : texto);
-            return originais;
         }
         return out;
     }
