@@ -49,6 +49,8 @@ public class Recipes {
     static final Set<String> READ_KINDS = Set.of("goto", "verify_text", "verify_attr", "verify_absent", "extract", "request", "screenshot", "wait", "capture_ids", "verify_new_id");
     /** Nomes gerados pelo MCP; receita nao pode declara-los como params. */
     static final Set<String> GERADOS = Set.of("now", "uuid", "today");
+    /** status que declara a receita provada: comeca com provada/provado seguido de fim de palavra ("nao provada" nao casa). */
+    private static final Pattern STATUS_PROVADA = Pattern.compile("^provad[ao]\\b");
     private static final DateTimeFormatter ISO_MS =
             DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
 
@@ -62,8 +64,8 @@ public class Recipes {
         return store.home.resolve("recipes");
     }
 
-    /** Acao expandida: passos prontos (com network), readOnly e rotulo do lote. */
-    public record Plan(String network, String action, boolean readOnly, ArrayNode steps, String label) {}
+    /** Acao expandida: passos prontos (com network), readOnly, rotulo do lote e se a receita e provada. */
+    public record Plan(String network, String action, boolean readOnly, ArrayNode steps, String label, boolean provada) {}
 
     /** Carrega a receita da rede; erro claro se ausente ou ilegivel. */
     public JsonNode load(String network) {
@@ -84,6 +86,27 @@ public class Recipes {
             return r;
         } catch (IOException e) {
             throw new IllegalStateException("falha ao ler receita " + f + ": " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Acao provada, na ordem: def.provada booleano vale o booleano; def.status (trim + minusculas)
+     * casa ^provad[ao]\\b ("nao provada" nao casa, porque comeca com "nao"); provas.json
+     * ({"&lt;rede&gt;": {"&lt;acao&gt;": "&lt;batchId&gt;"}}) tem a entrada — arquivo ausente ou ilegivel = sem entrada.
+     * Senao e nao provada. Acao readOnly e sempre provada (leitura nao publica).
+     */
+    static boolean receitaProvada(JsonNode def, String network, String action, Path provasFile) {
+        if (def.path("readOnly").asBoolean(false)) return true;
+        JsonNode p = def.get("provada");
+        if (p != null && p.isBoolean()) return p.asBoolean();
+        String status = def.path("status").asText("").trim().toLowerCase(Locale.ROOT);
+        if (!status.isEmpty() && STATUS_PROVADA.matcher(status).find()) return true;
+        if (provasFile == null || !Files.isRegularFile(provasFile)) return false;
+        try {
+            JsonNode provas = Json.parse(Files.readString(provasFile, StandardCharsets.UTF_8));
+            return provas.path(network).hasNonNull(action);
+        } catch (IOException | RuntimeException e) {
+            return false; // provas.json ilegivel = sem prova
         }
     }
 
@@ -184,7 +207,9 @@ public class Recipes {
             BatchStore.validateWaitBudget(out); // readOnly roda na hora, numa chamada MCP so
             BatchStore.validateIdPairs(out);
         }
-        return new Plan(network, action, readOnly, out, label(network, action, p));
+        Path provasFile = store.batchesDir().getParent().resolve("provas.json");
+        boolean provada = receitaProvada(def, network, action, provasFile);
+        return new Plan(network, action, readOnly, out, label(network, action, p), provada);
     }
 
     private void validateReadOnly(ArrayNode steps) {

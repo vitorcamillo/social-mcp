@@ -5,9 +5,12 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 
+import java.text.Normalizer;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -27,6 +30,9 @@ final class NewIds {
     static final int MAX_IDS = 5_000;
     /** stableMs padrao do capture_ids: 2 leituras seguidas iguais com poll de 1000 ms. */
     static final long STABLE_PADRAO_MS = 1_000;
+    /** URL do cobreSegmentos: corta o texto digitado onde a rede encurta/trunca links. */
+    static final Pattern PADRAO_URL = Pattern.compile(
+            "(?i)(https?://\\S+|www\\.\\S+|\\b[a-z0-9-]+(\\.[a-z0-9-]+)*\\.(uk|com|br|net|org|io|ly|co|me|app)(/\\S*)?)");
 
     private NewIds() {}
 
@@ -59,7 +65,8 @@ final class NewIds {
 
     record Captura(Spec spec, Set<String> ids, long ms, int leituras) {}
 
-    record Novo(String id, int outros, int ancoras) {}
+    /** Item novo achado: id, outros novos na mesma leitura, ancoras da captura e o texto cru do item. */
+    record Novo(String id, int outros, int ancoras, String texto) {}
 
     interface Relogio {
         long agora();
@@ -299,6 +306,7 @@ final class NewIds {
     static Novo verificar(Function<String, Object> exec, Relogio r, Spec s, Set<String> antes,
                           String expect, long timeoutMs, Predicate<String> correlacao) throws InterruptedException {
         boolean comTexto = expect != null && !expect.isEmpty();
+        String expectNorm = normEspacos(expect);
         String js = readScript(s, comTexto);
         Pattern re = regex(s.idRegex());
         long inicio = r.agora();
@@ -322,7 +330,7 @@ final class NewIds {
             }
             vistos = l.itens().size();
             int ancoras = 0;
-            List<String> novos = new ArrayList<>();
+            Map<String, String> novos = new LinkedHashMap<>();
             for (Item item : l.itens()) {
                 String id = idDoItem(s, item, re);
                 if (id == null) continue;
@@ -330,21 +338,64 @@ final class NewIds {
                     ancoras++;
                     continue;
                 }
-                if (comTexto) {
-                    String texto = item.texto() != null ? item.texto() : "";
-                    if (!texto.contains(expect)) continue;
-                }
+                if (comTexto && !normEspacos(item.texto()).contains(expectNorm)) continue;
                 if (correlacao != null && !correlacao.test(id)) continue;
-                if (!novos.contains(id)) novos.add(id);
+                novos.putIfAbsent(id, item.texto() != null ? item.texto() : "");
             }
             conhecidos = ancoras;
             if (!novos.isEmpty()) {
-                if (antes.isEmpty() || ancoras > 0) return new Novo(novos.get(0), novos.size() - 1, ancoras);
+                if (antes.isEmpty() || ancoras > 0) {
+                    Map.Entry<String, String> primeiro = novos.entrySet().iterator().next();
+                    return new Novo(primeiro.getKey(), novos.size() - 1, ancoras, primeiro.getValue());
+                }
                 candidatoSemAncora = true;
             }
             if (r.agora() - inicio >= timeoutMs) throw new IllegalStateException(timeoutMsg(s, expect, timeoutMs, vistos, conhecidos, candidatoSemAncora));
             r.dormir(VERIFY_POLL_MS);
         }
+    }
+
+    /**
+     * Normaliza espacos e lixo de largura zero para comparar texto de expect/item: NFC, remove os
+     * caracteres de largura zero (200b, 200c, 200d, feff), troca os espacos especiais (00a0, 2007,
+     * 202f) por espaco comum e colapsa \s+ (incluindo \n e \r) em um unico espaco, com trim. Nao
+     * muda maiusculas nem acentos.
+     */
+    static String normEspacos(String s) {
+        if (s == null) return "";
+        String t = Normalizer.normalize(s, Normalizer.Form.NFC)
+                .replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
+                .replace("\u00a0", " ").replace("\u2007", " ").replace("\u202f", " ");
+        return t.replaceAll("\\s+", " ").trim();
+    }
+
+    /**
+     * Diz se o texto exibido (itemTexto) contem o texto digitado inteiro (textoCompleto), aceitando
+     * que a rede encurte links: corta textoCompleto nas URLs (PADRAO_URL) e exige cada segmento
+     * restante dentro de itemTexto, em ordem. Segmento com menos de 3 caracteres sem espacos (apos
+     * normEspacos) e descartado; textoCompleto vazio nao tem nada a conferir (true).
+     */
+    public static boolean cobreSegmentos(String itemTexto, String textoCompleto) {
+        if (normEspacos(textoCompleto).isEmpty()) return true;
+        String item = normEspacos(itemTexto);
+        Matcher m = PADRAO_URL.matcher(textoCompleto);
+        int inicio = 0;
+        int busca = 0;
+        while (m.find()) {
+            busca = avancaSegmento(item, textoCompleto.substring(inicio, m.start()), busca);
+            if (busca < 0) return false;
+            inicio = m.end();
+        }
+        return avancaSegmento(item, textoCompleto.substring(inicio), busca) >= 0;
+    }
+
+    /** Procura o segmento em item a partir de busca; devolve a posicao apos o fim do achado, ou -1
+     *  se nao achou. Segmento curto (<3 chars sem espacos, apos normEspacos) nao avanca. */
+    private static int avancaSegmento(String item, String bruto, int busca) {
+        String seg = normEspacos(bruto);
+        if (seg.replace(" ", "").length() < 3) return busca;
+        int achou = item.indexOf(seg, busca);
+        return achou < 0 ? -1 : achou + seg.length();
     }
 
     private static String timeoutMsg(Spec s, String expect, long timeoutMs, int vistos, int conhecidos, boolean candidatoSemAncora) {

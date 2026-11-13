@@ -454,6 +454,46 @@ class NewIdsTest {
         assertTrue(falha.getMessage().contains("trace invalido"), falha.getMessage());
     }
 
+    @Test
+    void normEspacosColapsaEspacosERemoveLarguraZero() {
+        assertEquals("a b c d", NewIds.normEspacos("a\n\n b c\u200b d "));
+        assertEquals("", NewIds.normEspacos(null));
+    }
+
+    @Test
+    void verificarAchaNovoQuandoDomTemQuebraDeLinha() throws Exception {
+        String r = "{\"p\":-1,\"it\":[{\"v\":[\"a\"],\"t\":\"x\"},{\"v\":[\"b\"],\"t\":\"texto um\\ntexto dois\"}]}";
+        NewIds.Novo n = NewIds.verificar(new Fila().add(r),
+                new RelogioFake(), spec("css:article"), Set.of("a"), "texto um texto dois", 5_000);
+        assertEquals("b", n.id(), "\\n no DOM nao pode abortar o verify com o mesmo expect");
+    }
+
+    @Test
+    void verificarDevolveTextoCruDoItemEscolhido() throws Exception {
+        String r = "{\"p\":-1,\"it\":[{\"v\":[\"a\"],\"t\":\"x\"},{\"v\":[\"b\"],\"t\":\"texto um\\ntexto dois\"}]}";
+        NewIds.Novo n = NewIds.verificar(new Fila().add(r),
+                new RelogioFake(), spec("css:article"), Set.of("a"), "texto um texto dois", 5_000);
+        assertEquals("texto um\ntexto dois", n.texto(), "texto cru do item, sem normalizacao");
+        NewIds.Novo semT = NewIds.verificar(new Fila().add(leitura("a", "z")),
+                new RelogioFake(), spec("css:article"), Set.of("a"), "", 5_000);
+        assertEquals("", semT.texto(), "item sem t no DOM devolve texto vazio");
+    }
+
+    @Test
+    void cobreSegmentosExemplosDaSpec() {
+        assertTrue(NewIds.cobreSegmentos(
+                        "Garanta o seu\ningresso: exemplo.com.br/fiel\u2026 Segunda tem jogo",
+                        "Garanta o seu ingresso: https://exemplo.com.br/fiel/?utm_source=x Segunda tem jogo"),
+                "link encurtado ou truncado na tela nao impede a prova");
+        assertFalse(NewIds.cobreSegmentos(
+                        "Garanta o seu ingresso bSegunda tem jogo",
+                        "Garanta o seu ingresso\nSegunda tem jogo"),
+                "lixo no meio do texto exibido nao passa");
+        assertFalse(NewIds.cobreSegmentos("Segunda tem jogo Garanta", "Garanta Segunda tem jogo"),
+                "segmentos fora de ordem nao passam");
+        assertTrue(NewIds.cobreSegmentos("qualquer", ""), "textoCompleto vazio: nada a conferir");
+    }
+
     /** Roda o readScript no node com uma pagina falsa propria. */
     private JsonNode rodarPagina(String pagina, String expr) throws Exception {
         Path f = tmp.resolve("n-" + System.nanoTime() + ".js");

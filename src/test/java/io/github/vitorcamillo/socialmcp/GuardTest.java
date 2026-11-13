@@ -139,10 +139,62 @@ class GuardTest {
     void tripwireIgnoraFraseConhecidaMasPegaDesafioNovo() {
         Store s = store();
         ObjectNode cfg = s.networkCfg("reddit");
-        cfg.putArray("tripwireIgnore").add("Para continuar usando o Reddit, verifique se você é humano ou registre-se como um app");
+        long agora = System.currentTimeMillis();
+        cfg.putArray("tripwireIgnore").addObject()
+                .put("frase", "Para continuar usando o Reddit, verifique se você é humano ou registre-se como um app")
+                .put("criadoEm", agora - 3_600_000L).put("expiraEm", agora + 3_600_000L);
         String notificacao = "Verifique sua conta\nPara continuar usando o Reddit, verifique se você\né humano ou registre-se como um app em até 7 dias.";
         assertFalse(Guard.hitsTripwire(notificacao, cfg));
         assertTrue(Guard.hitsTripwire(notificacao + " Verifique se você é humano para continuar.", cfg));
+    }
+
+    /** Texto cujo unico padrao de anti-bot esta DENTRO da frase ignorada. */
+    private static final String PAGINA_HUMANA = "Para continuar usando o Reddit, verifique se você é humano para continuar.";
+
+    @Test
+    void tripwireIgnoreEmTextoPuroNaoIgnoraMais() {
+        Store s = store();
+        ObjectNode cfg = s.networkCfg("reddit");
+        // formato antigo (texto puro) nao vale mais: a frase volta a disparar
+        cfg.putArray("tripwireIgnore").add("Para continuar usando o Reddit, verifique se você é humano");
+        assertNotNull(Guard.tripwireMatch(PAGINA_HUMANA, cfg, System.currentTimeMillis()));
+    }
+
+    @Test
+    void tripwireIgnoreObjetoDentroDoPrazoIgnora() {
+        Store s = store();
+        ObjectNode cfg = s.networkCfg("reddit");
+        long agora = System.currentTimeMillis();
+        ObjectNode item = cfg.putArray("tripwireIgnore").addObject();
+        item.put("frase", "Para continuar usando o Reddit, verifique se você é humano")
+                .put("criadoEm", agora - 3_600_000L)
+                .put("expiraEm", agora + 3_600_000L);
+        assertNull(Guard.tripwireMatch(PAGINA_HUMANA, cfg, agora));
+    }
+
+    @Test
+    void tripwireIgnoreObjetoExpiradoNaoIgnora() {
+        Store s = store();
+        ObjectNode cfg = s.networkCfg("reddit");
+        long agora = System.currentTimeMillis();
+        ObjectNode item = cfg.putArray("tripwireIgnore").addObject();
+        item.put("frase", "Para continuar usando o Reddit, verifique se você é humano")
+                .put("criadoEm", agora - 48 * 3_600_000L)
+                .put("expiraEm", agora - 3_600_000L);
+        assertNotNull(Guard.tripwireMatch(PAGINA_HUMANA, cfg, agora));
+    }
+
+    @Test
+    void tripwireIgnoreTetoDe24hVencePrazoLongo() {
+        Store s = store();
+        ObjectNode cfg = s.networkCfg("reddit");
+        long agora = System.currentTimeMillis();
+        // expiraEm a 3 dias, mas criadoEm ha 25h: o teto de criadoEm + 24h ja venceu
+        ObjectNode item = cfg.putArray("tripwireIgnore").addObject();
+        item.put("frase", "Para continuar usando o Reddit, verifique se você é humano")
+                .put("criadoEm", agora - 25 * 3_600_000L)
+                .put("expiraEm", agora + 72 * 3_600_000L);
+        assertNotNull(Guard.tripwireMatch(PAGINA_HUMANA, cfg, agora));
     }
 
     @Test

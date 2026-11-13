@@ -9,9 +9,12 @@ import io.github.selenium.javaDriverless.types.WebElement;
 
 import java.nio.file.Files;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -105,6 +108,8 @@ public class Tools {
                 case "social_draft_batch" -> draftBatch(args);
                 case "social_action" -> action(args);
                 case "social_probe" -> probe(args);
+                case "social_find_duplicates" -> findDuplicates(args);
+                case "social_resolve_incerteza" -> resolverIncerteza(args);
                 case "social_execute_batch" -> executeBatch(args);
                 case "social_set_network_state" -> setNetworkState(args);
                 case "social_journal_tail" -> journalTail(args);
@@ -333,7 +338,12 @@ public class Tools {
     }
 
     private String draftResponse(String label, JsonNode actions) throws Exception {
-        JsonNode batch = batches.draft(label, actions);
+        return draftResponse(label, actions, null);
+    }
+
+    /** origem (receita + provada) so vem de social_action; rascunho manual usa null. Resposta igual. */
+    private String draftResponse(String label, JsonNode actions, ObjectNode origem) throws Exception {
+        JsonNode batch = origem == null ? batches.draft(label, actions) : batches.draft(label, actions, origem);
         String id = batch.get("id").asText();
 
         // preflight: mostra o que a guarda diria HOJE (pode mudar ate a aprovacao)
@@ -375,7 +385,8 @@ public class Tools {
         validateActionState(state, plan.readOnly());
         if (!plan.readOnly()) {
             String label = args.path("label").asText("");
-            return draftResponse(label.isBlank() ? plan.label() : label, plan.steps());
+            ObjectNode origem = Json.obj().put("receita", plan.action()).put("provada", plan.provada());
+            return draftResponse(label.isBlank() ? plan.label() : label, plan.steps(), origem);
         }
         return runReadOnly(plan);
     }
@@ -445,7 +456,7 @@ public class Tools {
             idsNovosLote.clear();
             traceCleanupFailures += fecharTraces();
         }
-        store.appendJournal("browse", network, Json.obj().put("action", plan.action()).set("urls", urls));
+        store.appendJournal("browse", network, Json.obj().put("action", plan.action()).put("ok", erro == null && !trip).set("urls", urls));
         ObjectNode out = Json.obj();
         out.put("network", network);
         out.put("action", plan.action());
@@ -609,6 +620,174 @@ public class Tools {
     }
 
     /**
+     * social_find_duplicates: somente leitura, sem cota. Lista os posts do perfil
+     * (receita list_posts), abre cada um, tira o texto de interface comum e agrupa
+     * legendas parecidas (Jaccard de shingles). Nunca clica, digita ou publica.
+     */
+    private String findDuplicates(JsonNode args) throws Exception {
+        String network = args.path("network").asText("");
+        requireNetwork(network);
+        int maxPosts = args.path("maxPosts").asInt(12);
+        maxPosts = Math.min(30, Math.max(1, maxPosts));
+        double limiar = args.path("limiar").asDouble(0.6);
+        if (Double.isNaN(limiar)) limiar = 0.6;
+        limiar = Math.min(0.95, Math.max(0.3, limiar));
+        Recipes.Plan plan = recipes.prepare(network, "list_posts", Json.obj());
+        validateActionState(store.effectiveState(network), true);
+        JsonNode lista = Json.parse(runReadOnly(plan));
+        if (!lista.path("ok").asBoolean(false)) {
+            ObjectNode fora = Json.obj();
+            fora.put("network", network);
+            fora.put("ok", false);
+            fora.put("motivo", lista.path("motivo").asText(""));
+            fora.put("tripwire", lista.path("tripwire").asBoolean(false));
+            return Json.writePretty(fora);
+        }
+        LinkedHashSet<String> urls = new LinkedHashSet<>();
+        for (JsonNode passo : lista.path("passos")) {
+            JsonNode extraido = passo.path("extraido");
+            if (!extraido.isArray()) continue;
+            for (JsonNode item : extraido) {
+                String cand;
+                if (item.isTextual()) {
+                    cand = item.asText();
+                } else if (item.isObject()) {
+                    cand = item.path("href").asText("");
+                    if (cand.isBlank()) cand = item.path("url").asText("");
+                } else {
+                    cand = item.asText("");
+                }
+                if (cand == null) continue;
+                cand = cand.trim();
+                int hash = cand.indexOf('#');
+                if (hash >= 0) cand = cand.substring(0, hash);
+                if (cand.startsWith("http://") || cand.startsWith("https://")) urls.add(cand);
+                if (urls.size() >= maxPosts) break;
+            }
+            if (urls.size() >= maxPosts) break;
+        }
+        List<Duplicates.Pagina> paginas = new ArrayList<>();
+        ArrayNode falhas = Json.M.createArrayNode();
+        ObjectNode tmp = Json.obj();
+        boolean tripwire = false;
+        for (String url : urls) {
+            Guard.Decision dec = Guard.check(store, network, "goto");
+            if (!dec.allowed()) {
+                falhas.addObject().put("url", url).put("erro", dec.reason());
+                break;
+            }
+            try {
+                JavaDriverless d = pool.get(network);
+                d.get(url);
+                d.sleep(2.0 + Math.random() * 2.0);
+                int maxChars = store.networkCfg(network).path("pageTextMaxChars").asInt(12_000);
+                String texto = BrowserPool.visibleText(d, maxChars);
+                if (aplicarTripwire(network, textoParaGuarda(BrowserPool.alertText(d), texto),
+                        "padrao de anti-bot no social_find_duplicates: " + url, tmp)) {
+                    tripwire = true;
+                    break;
+                }
+                paginas.add(new Duplicates.Pagina(url, texto));
+            } catch (Exception e) {
+                falhas.addObject().put("url", url).put("erro", String.valueOf(e.getMessage()));
+            }
+        }
+        if (tripwire) {
+            ObjectNode out = Json.obj();
+            out.put("network", network);
+            out.put("ok", false);
+            out.put("readOnly", true);
+            out.put("analisados", paginas.size());
+            out.put("limiar", limiar);
+            out.putArray("duplicados");
+            out.set("falhas", falhas);
+            out.put("tripwire", true);
+            out.put("AVISO", tmp.path("AVISO").asText(
+                    "pagina contem padrao de bloqueio/anti-bot; rede em cooldown. Investigue manualmente antes de qualquer acao."));
+            if (tmp.has("tripwirePadrao")) out.put("tripwirePadrao", tmp.path("tripwirePadrao").asText(""));
+            if (tmp.has("tripwireContexto")) out.put("tripwireContexto", tmp.path("tripwireContexto").asText(""));
+            return Json.writePretty(out);
+        }
+        List<Duplicates.Grupo> grupos = Duplicates.agrupar(paginas, limiar);
+        store.appendJournal("duplicates_check", network,
+                Json.obj().put("analisados", paginas.size()).put("grupos", grupos.size()));
+        ObjectNode out = Json.obj();
+        out.put("network", network);
+        out.put("ok", true);
+        out.put("readOnly", true);
+        out.put("analisados", paginas.size());
+        out.put("limiar", limiar);
+        ArrayNode dups = out.putArray("duplicados");
+        for (Duplicates.Grupo g : grupos) {
+            ObjectNode e = dups.addObject();
+            e.put("similaridade", g.similaridade());
+            ArrayNode posts = e.putArray("posts");
+            for (int i = 0; i < g.urls().size(); i++) {
+                posts.addObject().put("url", g.urls().get(i)).put("inicio", g.inicios().get(i));
+            }
+        }
+        out.set("falhas", falhas);
+        out.put("tripwire", false);
+        return Json.writePretty(out);
+    }
+
+    /** Resultados aceitos na conferencia NA REDE registrada pelo social_resolve_incerteza. */
+    static final Set<String> RESULTADOS_INCERTEZA = Set.of("no_ar", "nao_saiu", "apagado");
+
+    /**
+     * social_resolve_incerteza: registra o que a conferencia NA REDE mostrou para um lote com
+     * envio incerto ou duplicata suspeita e libera a trava da rede (evento incerteza_resolvida
+     * no journal). Nunca publica nem apaga nada: prova e o que foi VISTO na rede.
+     */
+    private String resolverIncerteza(JsonNode args) throws Exception {
+        String batchId = args.path("batchId").asText("");
+        if (!batchId.matches("[A-Za-z0-9-]+")) {
+            throw new IllegalArgumentException("batchId invalido: '" + batchId + "'");
+        }
+        java.nio.file.Path executed = store.batchesDir().resolve(batchId + ".executed.json");
+        if (!java.nio.file.Files.isRegularFile(executed)) {
+            throw new IllegalArgumentException("lote " + batchId + " nao esta executado (sem "
+                    + executed.getFileName() + " em batches/)");
+        }
+        JsonNode b;
+        try {
+            b = Json.parse(java.nio.file.Files.readString(executed, java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            throw new IllegalArgumentException("lote " + batchId + " ilegivel: " + e.getMessage());
+        }
+        String network = b.path("network").asText(b.path("actions").path(0).path("network").asText(""));
+        String conf = b.path("result").path("conferencia").asText("");
+        if (!Store.CONFERENCIAS_INCERTAS.contains(conf)) {
+            throw new IllegalArgumentException("lote " + batchId + " nao tem envio incerto nem duplicata suspeita"
+                    + " (conferencia=" + conf + "); nao precisa de resolucao");
+        }
+        String resultado = args.path("resultado").asText("");
+        if (!RESULTADOS_INCERTEZA.contains(resultado)) {
+            throw new IllegalArgumentException("resultado invalido '" + resultado + "' (use no_ar|nao_saiu|apagado)");
+        }
+        String prova = args.path("prova").asText("");
+        if (prova.trim().length() < 8) {
+            throw new IllegalArgumentException("prova obrigatoria com pelo menos 8 caracteres depois do trim:"
+                    + " URL/id do post no ar, ou descricao objetiva da leitura que mostrou que nao saiu/foi apagado");
+        }
+        if (!store.incertezasPendentes(network).contains(batchId)) {
+            throw new IllegalArgumentException("lote " + batchId + " ja foi resolvido (ou e anterior a travaIncertezaDesde)");
+        }
+        store.appendJournal("incerteza_resolvida", network, Json.obj()
+                .put("batchId", batchId)
+                .put("resultado", resultado)
+                .put("prova", prova.trim())
+                .put("nota", args.path("nota").asText("")));
+        ObjectNode out = Json.obj();
+        out.put("batchId", batchId);
+        out.put("network", network);
+        out.put("resultado", resultado);
+        ArrayNode pendentes = out.putArray("pendentesNaRede");
+        for (String p : store.incertezasPendentes(network)) pendentes.add(p);
+        return Json.writePretty(out);
+    }
+
+    /**
      * Prazo da execucao de um lote (e da acao readOnly): o lote roda numa unica chamada MCP e
      * o cliente corta antes (Codex: tool_timeout_sec = 900). Passado o prazo, o lote aborta
      * antes do proximo passo e os waits encurtam para caber.
@@ -679,6 +858,11 @@ public class Tools {
             }
         }
         if (temPassoPublico) {
+            // mesma trava do Guard.check, aqui antes do claim: o lote nem e reservado
+            List<String> pendentes = store.incertezasPendentes(net);
+            if (!pendentes.isEmpty()) {
+                throw new IllegalStateException(Guard.motivoTravaIncerteza(net, pendentes));
+            }
             Store.Usage u = store.usageFor(net, id);
             int maxPub = store.networkCfg(net).path("maxPublicActionsPerDay").asInt(5);
             if (u.publicActions + 1 > maxPub) {
@@ -704,6 +888,9 @@ public class Tools {
         ArrayNode results = Json.M.createArrayNode();
         int done = 0;
         boolean publicoFeito = false;
+        boolean envioFeito = false;
+        boolean duplicataSuspeita = false;
+        boolean textoDivergente = false;
         String abortReason = null;
         long inicio = System.currentTimeMillis();
         prazoFimMs = inicio + PRAZO_LOTE_MS;
@@ -739,6 +926,13 @@ public class Tools {
                     }
                     journalAction(store, network, kind, a, id, step, true);
                     if (Guard.isPublic(kind) && !step.path("pulado").asBoolean(false)) publicoFeito = true;
+                    // envio de fato (ex.: botao Publicar), nao clique de foco/composer; se pulado (ifPresent
+                    // ausente) nao houve tentativa; verify_new_id com 2+ itens novos = possivel publicacao em dobro
+                    if (ehEnvio(actions, passoIdx) && !step.path("pulado").asBoolean(false)) envioFeito = true;
+                    if ("verify_new_id".equals(kind)) {
+                        if (step.path("outrosNovos").asInt(0) > 0) duplicataSuspeita = true;
+                        if (step.path("textoDivergente").asBoolean(false)) textoDivergente = true;
+                    }
                     String sample = BrowserPool.visibleText(pool.get(network), 4000);
                     ObjectNode cfgTw2 = store.networkCfg(network);
                     String padraoTw2 = Guard.tripwireMatch(sample, cfgTw2);
@@ -770,6 +964,7 @@ public class Tools {
                     // NaoAgiu = falha garantidamente antes do efeito, nao conta.
                     if (talvezAgiu(kind, e, step)) {
                         publicoFeito = true;
+                        if (ehEnvio(actions, passoIdx)) envioFeito = true;
                         journalAction(store, network, kind, a, id, step, false);
                     }
                     if ("request".equals(kind) && (step.path("status").asInt(0) > 0 || step.path("incerto").asBoolean(false))) {
@@ -808,7 +1003,7 @@ public class Tools {
         summary.put("passosTotais", actions.size());
         summary.put("abortado", abortReason != null);
         if (abortReason != null) summary.put("motivo", abortReason);
-        String conf = conferenciaFinal(actions, abortReason != null, publicoFeito);
+        String conf = conferenciaFinal(actions, abortReason != null, publicoFeito, envioFeito, duplicataSuspeita, textoDivergente);
         summary.put("conferencia", conf);
         if (publicoFeito && !BatchStore.CONF_FORTE.equals(conf)) {
             summary.put("AVISO", avisoConferencia(conf));
@@ -849,20 +1044,61 @@ public class Tools {
     }
 
     static final String CONF_ABORTADO_APOS_PUBLICO = "abortado_apos_publico";
+    static final String CONF_ABORTADO_ANTES_ENVIO = "abortado_antes_do_envio";
+    static final String CONF_DUPLICATA_SUSPEITA = "duplicata_suspeita";
     static final String CONF_NADA_PUBLICO = "nenhum_passo_publico_feito";
+
+    /** Passos de conferencia que fecham a busca pelo ultimo passo publico do envio (ehEnvio). */
+    private static final Set<String> KINDS_CONFERENCIA = Set.of("verify_text", "verify_attr", "verify_absent", "verify_new_id");
+
+    /**
+     * Passo publico de envio: tem "envio": true; ou, quando NENHUM passo do lote declara envio,
+     * e o ULTIMO passo publico antes do proximo passo de conferencia (ou do fim do lote) — o
+     * clique de foco ou de abrir composer, que vem antes do type e do botao Publicar, nao e envio.
+     */
+    static boolean ehEnvio(JsonNode actions, int i) {
+        JsonNode a = actions.get(i);
+        if (!Guard.isPublic(a.path("kind").asText(""))) return false;
+        if (a.path("envio").asBoolean(false)) return true;
+        for (JsonNode p : actions) {
+            if (p.has("envio")) return false; // declaracao explicita em qualquer passo: so o marcado e envio
+        }
+        for (int j = i + 1; j < actions.size(); j++) {
+            String k = actions.get(j).path("kind").asText("");
+            if (KINDS_CONFERENCIA.contains(k)) return true;
+            if (Guard.isPublic(k)) return false;
+        }
+        return true;
+    }
 
     /** Conferencia do resultado: a estatica do lote se rodou inteiro; senao, o que se sabe do aborto. */
     static String conferenciaFinal(JsonNode actions, boolean abortado, boolean publicoFeito) {
+        return conferenciaFinal(actions, abortado, publicoFeito, publicoFeito, false, false);
+    }
+
+    /**
+     * Conferencia com o que a execucao aprendeu: duplicata suspeita vence tudo (possivel publicacao
+     * em dobro); aborto DEPOIS do envio segue abortado_apos_publico (scripts externos leem esse
+     * texto), aborto ANTES do envio e novo; prova forte cujo texto exibido nao cobriu o digitado
+     * inteiro cai para fraca.
+     */
+    static String conferenciaFinal(JsonNode actions, boolean abortado, boolean publicoFeito,
+                                   boolean envioFeito, boolean duplicataSuspeita, boolean textoDivergente) {
+        if (duplicataSuspeita) return CONF_DUPLICATA_SUSPEITA;
         if (!publicoFeito) {
             return BatchStore.CONF_SEM_PUBLICO.equals(BatchStore.conferencia(actions)) ? BatchStore.CONF_SEM_PUBLICO : CONF_NADA_PUBLICO;
         }
-        if (abortado) return CONF_ABORTADO_APOS_PUBLICO;
-        return BatchStore.conferencia(actions);
+        if (abortado) return envioFeito ? CONF_ABORTADO_APOS_PUBLICO : CONF_ABORTADO_ANTES_ENVIO;
+        String base = BatchStore.conferencia(actions);
+        if (BatchStore.CONF_FORTE.equals(base) && textoDivergente) return BatchStore.CONF_FRACA;
+        return base;
     }
 
     static String avisoConferencia(String conf) {
         return switch (conf) {
-            case CONF_ABORTADO_APOS_PUBLICO -> "lote abortou DEPOIS de um passo publico: a acao pode ter tido efeito (ou nao). Confira na rede antes de qualquer novo lote.";
+            case CONF_DUPLICATA_SUSPEITA -> "apareceram 2+ itens novos com o mesmo texto: possivel publicacao em dobro. Rede travada para lote publico ate social_resolve_incerteza.";
+            case CONF_ABORTADO_APOS_PUBLICO -> "lote abortou DEPOIS de um passo publico: a acao pode ter tido efeito (ou nao). Confira na rede antes de qualquer novo lote. Rede travada para lote publico ate social_resolve_incerteza.";
+            case CONF_ABORTADO_ANTES_ENVIO -> "lote abortou antes do passo de envio: nada deveria ter saido, mas confira se ficou rascunho ou composer aberto.";
             case BatchStore.CONF_FRACA -> "o lote rodou, mas a conferencia e fraca: texto solto na pagina (pode ser o proprio texto digitado ainda no editor) ou ausencia sem prova positiva de que a pagina carregou (pagina de login/vazia tambem nao tem o item). NAO declare publicado sem conferir na rede.";
             default -> "o lote rodou sem nenhuma conferencia depois do ultimo passo publico. NAO declare publicado sem conferir na rede.";
         };
@@ -1060,7 +1296,7 @@ public class Tools {
                 return runCaptureIds(d, a, out);
             }
             case "verify_new_id" -> {
-                return runVerifyNewId(d, a, out);
+                return runVerifyNewId(d, a, out, batch, passoIdx);
             }
             case "wait" -> {
                 return runWait(d, a);
@@ -1205,8 +1441,11 @@ public class Tools {
     /**
      * verify_new_id: espera um item cujo id nao esta no conjunto do capture_ids de mesmo name.
      * Sem capture_ids no lote em curso = erro (o par so vale dentro do mesmo lote/acao).
+     * Com o texto integral digitado (textoCompleto da acao ou o text do ultimo type antes deste
+     * passo), confere se o texto EXIBIDO no item novo cobre o texto digitado inteiro: nao cobrindo,
+     * marca textoDivergente e o passo segue ok (a conferencia cai para fraca).
      */
-    private String runVerifyNewId(JavaDriverless d, JsonNode a, ObjectNode out) throws InterruptedException {
+    private String runVerifyNewId(JavaDriverless d, JsonNode a, ObjectNode out, JsonNode batch, int passoIdx) throws InterruptedException {
         String name = a.path("name").asText();
         NewIds.Captura c = capturas.get(name);
         if (c == null) {
@@ -1245,7 +1484,29 @@ public class Tools {
         if (novo.outros() > 0) out.put("outrosNovos", novo.outros());
         String info = "id novo em '" + name + "': " + corta(novo.id(), 120);
         if (novo.outros() > 0) info += " (ATENCAO: mais " + novo.outros() + " itens novos)";
+        String textoCompleto = textoDigitadoDoLote(a, batch, passoIdx);
+        if (!textoCompleto.isBlank() && !NewIds.cobreSegmentos(novo.texto(), textoCompleto)) {
+            out.put("textoDivergente", true);
+            info += " (ATENCAO: texto exibido nao cobre o texto digitado inteiro)";
+        }
         return info;
+    }
+
+    /**
+     * Texto integral que deveria aparecer no item novo: o campo textoCompleto da acao ou, sem
+     * ele, o text do ultimo passo type ANTES deste no lote (passos vem do lote via runStep);
+     * fora de lote (readOnly), vazio: sem texto digitado nao ha o que conferir.
+     */
+    static String textoDigitadoDoLote(JsonNode a, JsonNode batch, int passoIdx) {
+        String campo = a.path("textoCompleto").asText("");
+        if (!campo.isBlank()) return campo;
+        if (batch == null) return "";
+        JsonNode actions = batch.path("actions");
+        for (int j = Math.min(passoIdx, actions.size()) - 1; j >= 0; j--) {
+            JsonNode prev = actions.get(j);
+            if (prev != null && "type".equals(prev.path("kind").asText(""))) return prev.path("text").asText("");
+        }
+        return "";
     }
 
     private static String corta(String s, int max) {
@@ -1925,6 +2186,29 @@ public class Tools {
                     "network": { "type": "string" },
                     "action": { "type": "string" },
                     "params": { "type": "object" }
+                  }
+                }
+              },
+              {
+                "name": "social_find_duplicates",
+                "description": "Somente leitura, sem cota: lista os posts do perfil (receita list_posts), abre cada um, tira o texto de interface comum e agrupa posts com legenda parecida (Jaccard de shingles). Use para confirmar publicação duplicada depois de lote abortado ou refeito. Não apaga nada: exclusão segue o fluxo de lote com aprovação.",
+                "inputSchema": { "type": "object", "properties": {
+                  "network": { "type": "string" },
+                  "maxPosts": { "type": "integer", "default": 12 },
+                  "limiar": { "type": "number", "default": 0.6 }
+                }, "required": ["network"] }
+              },
+              {
+                "name": "social_resolve_incerteza",
+                "description": "Registra o que a conferencia NA REDE mostrou para um lote com envio incerto ou duplicata suspeita (libera a trava da rede). prova = URL/id do post no ar, ou descricao objetiva da leitura que mostrou que nao saiu/foi apagado. Nao publica nem apaga nada.",
+                "inputSchema": {
+                  "type": "object",
+                  "required": ["batchId", "resultado", "prova"],
+                  "properties": {
+                    "batchId": { "type": "string" },
+                    "resultado": { "type": "string", "enum": ["no_ar", "nao_saiu", "apagado"], "description": "no_ar = esta publicado; nao_saiu = nunca foi publicado; apagado = foi publicado e ja foi apagado" },
+                    "prova": { "type": "string", "description": "URL/id do post no ar, ou descricao objetiva da leitura que mostrou que nao saiu/foi apagado (>= 8 caracteres)" },
+                    "nota": { "type": "string", "description": "observacao opcional (ex.: o que foi feito com a duplicata)" }
                   }
                 }
               },

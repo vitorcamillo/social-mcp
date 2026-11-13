@@ -587,7 +587,7 @@ class BatchStoreTest {
         Store s = storeUpload(raiz, null);
         BatchStore bs = new BatchStore(s);
         String id = bs.draft("up", Json.parse(loteUpload(img.toString(), CLIQUE))).get("id").asText();
-        bs.approve(id, "humano", null);
+        bs.approve(id, "humano", null, List.of(), false, true);
         JsonNode aprovado = bs.requireApproved(id);
         assertEquals(1, aprovado.path("midias").size());
         assertEquals(BatchStore.sha256Arquivo(img), aprovado.path("midias").get(0).path("sha256").asText());
@@ -611,7 +611,7 @@ class BatchStoreTest {
         Store s = storeUpload(raiz, null);
         BatchStore bs = new BatchStore(s);
         String id = bs.draft("up", Json.parse(loteUploads(List.of(a.toString(), b.toString()), CLIQUE))).get("id").asText();
-        bs.approve(id, "humano", null);
+        bs.approve(id, "humano", null, List.of(), false, true);
         JsonNode aprovado = bs.requireApproved(id);
         assertEquals(2, aprovado.path("midias").size());
         assertEquals(0, aprovado.path("midias").get(0).path("indice").asInt());
@@ -659,7 +659,9 @@ class BatchStoreTest {
         Store s = storeUpload(raiz, null);
         BatchStore bs = new BatchStore(s);
         for (boolean executa : new boolean[]{true, false}) {
-            String id = bs.draft("up", Json.parse(loteUpload(img.toString(), CLIQUE))).get("id").asText();
+            // origem provada: o foco aqui e a midia, nao o ensaio
+            ObjectNode origem = Json.obj().put("receita", "create_photo_post").put("provada", true);
+            String id = bs.draft("up", Json.parse(loteUpload(img.toString(), CLIQUE)), origem).get("id").asText();
             bs.approve(id, "humano", null);
             Path copia = BatchStore.copiaAprovada(s, bs.requireApproved(id).path("midias").get(0));
             assertTrue(Files.isRegularFile(copia));
@@ -1191,5 +1193,92 @@ class BatchStoreTest {
         assertTrue(linhaAb.contains("(2 acoes)"), linhaAb);
         assertTrue(linhaSemConf.endsWith("[abortado: sem_conferencia]"), linhaSemConf);
         assertFalse(linhaDraft.contains("[abortado:"), linhaDraft);
+    }
+
+    // ---------- ensaio (lote cru / receita nao provada) e provas.json ----------
+
+    private static final String LOTE_CRU_CLICK =
+            "[{\"network\":\"bluesky\",\"kind\":\"click\",\"selector\":\"css:button\"}]";
+
+    @Test
+    void loteCruComPassoPublicoPrecisaEnsaio() {
+        JsonNode cru = Json.obj().put("id", "b1").set("actions", Json.parse(LOTE_CRU_CLICK));
+        assertTrue(BatchStore.precisaEnsaio(cru));
+        ObjectNode provada = (ObjectNode) cru.deepCopy();
+        provada.putObject("origem").put("receita", "create_post").put("provada", true);
+        assertFalse(BatchStore.precisaEnsaio(provada));
+        ObjectNode naoProvada = (ObjectNode) cru.deepCopy();
+        naoProvada.putObject("origem").put("receita", "create_post").put("provada", false);
+        assertTrue(BatchStore.precisaEnsaio(naoProvada));
+        // lote sem passo publico nunca precisa
+        JsonNode semPublico = Json.obj().put("id", "b2").set("actions", acoes());
+        assertFalse(BatchStore.precisaEnsaio(semPublico));
+    }
+
+    @Test
+    void requireApprovedExigeEnsaioParaLoteCruComPublico() throws Exception {
+        Store s = store();
+        BatchStore bs = new BatchStore(s);
+        String id = bs.draft("cru", Json.parse(LOTE_CRU_CLICK)).get("id").asText();
+        bs.approve(id, "humano", "aprovado sem saber do ensaio");
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> bs.requireApproved(id));
+        assertTrue(e.getMessage().contains("--ensaio"), e.getMessage());
+        assertTrue(String.join("\n", s.tail(4)).contains("batch_execute_refused"), String.join("\n", s.tail(4)));
+    }
+
+    @Test
+    void approveComEnsaioDestravaAExecucao() throws Exception {
+        Store s = store();
+        BatchStore bs = new BatchStore(s);
+        String id = bs.draft("cru ensaiado", Json.parse(LOTE_CRU_CLICK)).get("id").asText();
+        assertEquals("PASS", bs.approve(id, "humano", "ensaio autorizado no terminal", List.of(), false, true));
+        JsonNode a = bs.requireApproved(id);
+        assertTrue(a.path("ensaioAutorizado").asBoolean(false));
+        assertEquals("humano", a.path("ensaioPor").asText());
+        assertTrue(String.join("\n", s.tail(4)).contains("ensaio_autorizado"), String.join("\n", s.tail(4)));
+        bs.markExecuted(id, Json.obj().put("conferencia", "fraca"));
+        // sem origem.receita, nem markExecuted com forte gravaria provas.json
+        assertFalse(Files.exists(s.batchesDir().getParent().resolve("provas.json")));
+    }
+
+    @Test
+    void markExecutedComConferenciaFortePromoveReceita() throws Exception {
+        Store s = store();
+        BatchStore bs = new BatchStore(s);
+        ObjectNode origem = Json.obj().put("receita", "create_post").put("provada", true);
+        String id = bs.draft("promover", Json.parse(LOTE_CRU_CLICK), origem).get("id").asText();
+        bs.approve(id, "humano", "ok");
+        bs.markExecuted(id, Json.obj().put("conferencia", "forte"));
+        Path provas = s.batchesDir().getParent().resolve("provas.json");
+        assertTrue(Files.exists(provas));
+        JsonNode p = Json.parse(Files.readString(provas));
+        assertEquals(id, p.path("bluesky").path("create_post").asText());
+        assertTrue(String.join("\n", s.tail(4)).contains("receita_provada"), String.join("\n", s.tail(4)));
+        // conferencia fraca nao promove
+        String id2 = bs.draft("nao promove", Json.parse(LOTE_CRU_CLICK), origem).get("id").asText();
+        bs.approve(id2, "humano", "ok");
+        bs.markExecuted(id2, Json.obj().put("conferencia", "fraca"));
+        p = Json.parse(Files.readString(provas));
+        assertFalse(p.path("bluesky").has(id2));
+        assertEquals(id, p.path("bluesky").path("create_post").asText());
+    }
+
+    @Test
+    void conferenciaSeletorDePaginaInteiraEFraca() {
+        JsonNode fraca = Json.parse("""
+                [{"network":"instagram","kind":"click","selector":"css:button"},
+                 {"network":"instagram","kind":"verify_text","selector":"css:main","expect":"compartilhado"}]
+                """);
+        assertEquals("fraca", BatchStore.conferencia(fraca));
+        JsonNode forte = Json.parse("""
+                [{"network":"instagram","kind":"click","selector":"css:button"},
+                 {"network":"instagram","kind":"verify_text","selector":"css:article[data-id='x']","expect":"compartilhado"}]
+                """);
+        assertEquals("forte", BatchStore.conferencia(forte));
+        assertTrue(BatchStore.seletorDePaginaInteira(" main "));
+        assertTrue(BatchStore.seletorDePaginaInteira("XPATH://MAIN"));
+        assertTrue(BatchStore.seletorDePaginaInteira("//body"));
+        assertFalse(BatchStore.seletorDePaginaInteira("css:main > div"));
+        assertFalse(BatchStore.seletorDePaginaInteira(null));
     }
 }

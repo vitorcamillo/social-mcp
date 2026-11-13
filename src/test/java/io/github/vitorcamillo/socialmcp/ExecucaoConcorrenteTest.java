@@ -45,7 +45,7 @@ class ExecucaoConcorrenteTest {
 
     private static String aprovado(BatchStore bs) throws Exception {
         String id = bs.draft("t", acoes()).get("id").asText();
-        bs.approve(id, "humano", null);
+        bs.approve(id, "humano", null, List.of(), false, true); // lote cru com passo publico: ensaio do dono
         return id;
     }
 

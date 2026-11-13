@@ -9,9 +9,24 @@ import java.util.List;
  * CLI do aprovador unico. So roda em terminal, fora do alcance do agente executor.
  * Quem aprova: o dono (humano) ou o orquestrador ativo que esta vendo a operacao.
  * Sem orquestrador vendo, o lote espera aprovacao humana.
+ * Comandos que reativam a rede ou afrouxam o gate (state healthy, --forcar, --ensaio)
+ * exigem TTY interativo do dono + CONFIRMO: agente (sem TTY) recebe codigo 2 sem
+ * alterar nada. Pausar (cooldown/paused/banned) e o kill-switch continuam abertos:
+ * pausar e sempre seguro.
  */
 public final class ApprovalCli {
     private ApprovalCli() {}
+
+    /** Ponto de injecao para teste; o padrao usa System.console() (null = sem TTY = agente). */
+    interface Terminal {
+        boolean interativo();
+        String lerLinha(String prompt);
+    }
+
+    static Terminal terminal = new Terminal() {
+        @Override public boolean interativo() { return System.console() != null; }
+        @Override public String lerLinha(String prompt) { return System.console().readLine(prompt); }
+    };
 
     public static void run(String[] args) {
         if (args.length == 0) {
@@ -26,7 +41,11 @@ public final class ApprovalCli {
                 System.exit(1);
             }
         }
-        Store store = new Store();
+        System.exit(run(args, new Store()));
+    }
+
+    /** Despachante testavel: devolve o codigo de saida em vez de chamar System.exit. */
+    static int run(String[] args, Store store) {
         BatchStore batches = new BatchStore(store);
         String cmd = args[0];
         try {
@@ -38,22 +57,25 @@ public final class ApprovalCli {
                 }
                 case "approve" -> {
                     if (args.length < 2) {
-                        System.out.println("uso: approve <batchId> [humano|orquestrador] [nota] [--fatos <arquivo>]... [--forcar]");
-                        System.exit(1);
+                        System.out.println("uso: approve <batchId> [humano|orquestrador] [nota] [--fatos <arquivo>]... [--forcar] [--ensaio]");
+                        return 1;
                     }
                     String aprovador = "humano";
                     String nota = "";
                     boolean forcar = false;
+                    boolean ensaio = false;
                     List<Path> fichas = new ArrayList<>();
                     List<String> posicionais = new ArrayList<>();
                     for (int i = 2; i < args.length; i++) {
                         String a = args[i];
                         if (a.equals("--forcar")) {
                             forcar = true;
+                        } else if (a.equals("--ensaio")) {
+                            ensaio = true;
                         } else if (a.equals("--fatos")) {
                             if (i + 1 >= args.length) {
                                 System.out.println("ERRO: --fatos exige um arquivo");
-                                System.exit(1);
+                                return 1;
                             }
                             fichas.add(Path.of(args[++i]));
                         } else {
@@ -66,14 +88,20 @@ public final class ApprovalCli {
                         idx = 1;
                     }
                     if (posicionais.size() > idx) nota = posicionais.get(idx);
-                    String resultado = batches.approve(args[1], aprovador, nota, fichas, forcar);
+                    String comando = "approve " + args[1] + (forcar ? " --forcar" : "") + (ensaio ? " --ensaio" : "");
+                    if (forcar || ensaio) {
+                        int g = exigirConfirmacao(comando);
+                        if (g != 0) return g;
+                    }
+                    registrarCli(store, comando);
+                    String resultado = batches.approve(args[1], aprovador, nota, fichas, forcar, ensaio);
                     String gate = forcar ? "gate FORCADO por humano" : "gate " + resultado;
                     System.out.println("Lote " + args[1] + " APROVADO por " + aprovador + " (" + gate + "). A operadora ja pode executar com social_execute_batch.");
                 }
                 case "reject" -> {
                     if (args.length < 2) {
                         System.out.println("uso: reject <batchId> [nota]");
-                        System.exit(1);
+                        return 1;
                     }
                     batches.reject(args[1], args.length >= 3 ? args[2] : "");
                     System.out.println("Lote " + args[1] + " rejeitado/revogado.");
@@ -81,21 +109,29 @@ public final class ApprovalCli {
                 case "state" -> {
                     if (args.length < 3) {
                         System.out.println("uso: state <rede> <healthy|cooldown|paused|banned> [motivo]");
-                        System.exit(1);
+                        return 1;
                     }
                     String estado = args[2];
                     if (!List.of("healthy", "cooldown", "paused", "banned").contains(estado)) {
                         System.out.println("estado invalido: " + estado);
-                        System.exit(1);
+                        return 1;
                     }
                     String motivo = args.length >= 4 ? args[3] : "(sem motivo)";
-                    store.setState(args[1], estado, motivo, "dono (CLI)");
+                    String comando = "state " + args[1] + " " + estado;
+                    String by = "dono (CLI)";
+                    if ("healthy".equals(estado)) {
+                        int g = exigirConfirmacao(comando);
+                        if (g != 0) return g;
+                        by = "dono (CLI tty)";
+                    }
+                    registrarCli(store, comando);
+                    store.setState(args[1], estado, motivo, by);
                     System.out.println("Rede '" + args[1] + "' agora esta '" + estado + "'.");
                 }
                 case "stop" -> {
                     if (args.length < 2) {
                         System.out.println("uso: stop on|off");
-                        System.exit(1);
+                        return 1;
                     }
                     boolean on = aplicarStop(store, args[1]);
                     System.out.println(on ? "Kill-switch ATIVO: nenhuma acao ate 'stop off'." : "Kill-switch desativado.");
@@ -103,14 +139,14 @@ public final class ApprovalCli {
                 case "import-cookies" -> {
                     if (args.length < 3) {
                         System.out.println("uso: import-cookies <rede> <arquivo.json>");
-                        System.exit(1);
+                        return 1;
                     }
                     System.out.println(SessionImporter.run(store, args[1], args[2]));
                 }
                 case "validar-receitas" -> {
                     RecipeValidator.Relatorio r = RecipeValidator.validar(store, args.length >= 2 ? args[1] : null);
                     System.out.println(RecipeValidator.texto(r));
-                    if (!r.ok()) System.exit(1);
+                    return r.ok() ? 0 : 1;
                 }
                 case "journal" -> {
                     int n = args.length >= 2 ? Integer.parseInt(args[1]) : 30;
@@ -119,10 +155,40 @@ public final class ApprovalCli {
                 }
                 default -> uso();
             }
+            return 0;
         } catch (Exception e) {
             System.out.println("ERRO: " + e.getMessage());
-            System.exit(1);
+            return 1;
         }
+    }
+
+    /**
+     * Comando sensivel (reativar rede, --forcar, --ensaio): so o dono num terminal
+     * interativo. Sem TTY (agente) recusa com codigo 2 sem alterar nada; com TTY,
+     * qualquer resposta que nao seja CONFIRMO recusa do mesmo jeito.
+     */
+    private static int exigirConfirmacao(String comando) {
+        if (!terminal.interativo()) {
+            System.err.println("RECUSADO: '" + comando + "' so pelo dono num terminal interativo (sem TTY = agente)");
+            return 2;
+        }
+        String resp = terminal.lerLinha("Digite CONFIRMO para seguir: ");
+        if (!"CONFIRMO".equals(resp)) {
+            System.err.println("RECUSADO: '" + comando + "' sem CONFIRMO");
+            return 2;
+        }
+        return 0;
+    }
+
+    /** Trilha de quem chamou a CLI: comando, usuario, se havia TTY e o processo pai. */
+    private static void registrarCli(Store store, String comando) {
+        ProcessHandle pai = ProcessHandle.current().parent().orElse(null);
+        store.appendJournal("cli_chamada", null, Json.obj()
+                .put("comando", comando)
+                .put("usuario", System.getProperty("user.name"))
+                .put("tty", terminal.interativo())
+                .put("ppid", pai == null ? -1L : pai.pid())
+                .put("paiCmd", pai == null ? "" : pai.info().command().orElse("")));
     }
 
     /**
@@ -171,11 +237,14 @@ public final class ApprovalCli {
                 uso: bin/social-mcp --cli <comando>
                   status                                     estado das redes e cotas
                   batches                                    lista lotes (draft/approved/executed/rejected)
-                  approve <batchId> [humano|orquestrador] [nota] [--fatos <arquivo>]... [--forcar]
+                  approve <batchId> [humano|orquestrador] [nota] [--fatos <arquivo>]... [--forcar] [--ensaio]
                                                              aprova lote apos o gate de texto (aprovador unico:
-                                                             dono ou orquestrador ativo); --forcar so humano
+                                                             dono ou orquestrador ativo); --forcar e --ensaio so
+                                                             pelo dono num terminal interativo (CONFIRMO)
                   reject <batchId> [nota]                    rejeita rascunho ou revoga lote aprovado
                   state <rede> <healthy|cooldown|paused|banned> [motivo]
+                                                             reativar rede (healthy) so pelo dono num terminal
+                                                             interativo (CONFIRMO); pausar segue aberto
                   stop on|off                                kill-switch global
                   journal [n]                                ultimos n eventos
                   validar-receitas [rede]                    expande cada acao das receitas com params de exemplo

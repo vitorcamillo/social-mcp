@@ -3,6 +3,10 @@ package io.github.vitorcamillo.socialmcp;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -51,6 +55,12 @@ public final class Guard {
         if (!isPublic(kind)) {
             return new Decision(true, "acao de leitura");
         }
+        // trava por rede apos envio incerto/duplicata suspeita (lote em curso nunca esta em executed,
+        // entao nao se bloqueia); so social_resolve_incerteza libera
+        List<String> pendentes = store.incertezasPendentes(network);
+        if (!pendentes.isEmpty()) {
+            return new Decision(false, motivoTravaIncerteza(network, pendentes));
+        }
         ObjectNode cfg = store.networkCfg(network);
         int maxPub = cfg.path("maxPublicActionsPerDay").asInt(5);
         int minMin = cfg.path("minMinutesBetweenPublicActions").asInt(30);
@@ -71,17 +81,76 @@ public final class Guard {
         return new Decision(true, "dentro de cota e espacamento");
     }
 
+    /**
+     * Mensagem da trava por rede: lote(s) com envio incerto (abortado_apos_publico) ou duplicata
+     * suspeita so saem da lista com social_resolve_incerteza, que registra o que a conferencia
+     * NA REDE mostrou — a liberacao nunca sai de uma checagem aqui dentro.
+     */
+    public static String motivoTravaIncerteza(String network, List<String> lotes) {
+        return "rede '" + network + "' travada: lote(s) " + String.join(", ", lotes)
+                + " terminaram com envio incerto ou duplicata suspeita. Confira na rede e registre com social_resolve_incerteza"
+                + " (no_ar|nao_saiu|apagado) antes de qualquer acao publica.";
+    }
+
     /** Devolve o padrao casado (como esta na config) ou null. */
     public static String tripwireMatch(String pageText, ObjectNode netCfg) {
+        return tripwireMatch(pageText, netCfg, System.currentTimeMillis());
+    }
+
+    /** Marcador de criadoEm/expiraEm ilegivel (ou ausente). */
+    static final long DATA_ILEGIVEL = Long.MIN_VALUE;
+    private static final long PRAZO_TRIPWIRE_IGNORE_MS = 24 * 3_600_000L;
+
+    /** Epoch ms de um numero (epoch ms) ou texto ISO-8601 com offset; ilegivel = DATA_ILEGIVEL. */
+    static long epochMsDe(JsonNode n) {
+        if (n == null || n.isNull()) return DATA_ILEGIVEL;
+        if (n.isNumber()) return n.asLong(DATA_ILEGIVEL);
+        if (n.isTextual()) {
+            String s = n.asText().trim();
+            try {
+                return Long.parseLong(s);
+            } catch (NumberFormatException ignored) {
+            }
+            try {
+                return OffsetDateTime.parse(s).toInstant().toEpochMilli();
+            } catch (DateTimeParseException ignored) {
+            }
+            try {
+                return Instant.parse(s).toEpochMilli();
+            } catch (DateTimeParseException ignored) {
+            }
+        }
+        return DATA_ILEGIVEL;
+    }
+
+    /**
+     * Frase de tripwireIgnore que vale agora, ou null: item em texto puro (formato antigo), sem
+     * criadoEm/expiraEm legiveis, ou com o prazo vencido volta a disparar o tripwire. O item
+     * objeto vale enquanto agora &lt; min(expiraEm, criadoEm + 24h).
+     */
+    private static String fraseIgnoradaValida(JsonNode t, long agoraMs) {
+        if (!t.isObject()) return null;
+        String frase = t.path("frase").asText("").trim().toLowerCase().replaceAll("\\s+", " ");
+        if (frase.isEmpty()) return null;
+        long criado = epochMsDe(t.get("criadoEm"));
+        long expira = epochMsDe(t.get("expiraEm"));
+        if (criado == DATA_ILEGIVEL || expira == DATA_ILEGIVEL) return null;
+        if (agoraMs >= Math.min(expira, criado + PRAZO_TRIPWIRE_IGNORE_MS)) return null;
+        return frase;
+    }
+
+    /** Variante com relogio injetado (teste). */
+    public static String tripwireMatch(String pageText, ObjectNode netCfg, long agoraMs) {
         if (pageText == null || pageText.isBlank()) return null;
         if (netCfg == null) return null;
         String lower = pageText.toLowerCase().replaceAll("\\s+", " ");
-        // frases conhecidas e inofensivas (ex.: notificacao antiga ja resolvida) saem antes do casamento
+        // frases conhecidas e inofensivas (ex.: notificacao antiga ja resolvida) saem antes do casamento;
+        // cada ignoro tem prazo (criadoEm/expiraEm): vencido, a frase volta a disparar
         JsonNode ignorar = netCfg.path("tripwireIgnore");
         if (ignorar.isArray()) {
             for (JsonNode t : ignorar) {
-                String frase = t.asText("").trim().toLowerCase().replaceAll("\\s+", " ");
-                if (!frase.isEmpty()) lower = lower.replace(frase, " ");
+                String frase = fraseIgnoradaValida(t, agoraMs);
+                if (frase != null) lower = lower.replace(frase, " ");
             }
         }
         JsonNode arr = netCfg.path("tripwires");

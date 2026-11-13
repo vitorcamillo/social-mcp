@@ -294,6 +294,75 @@ public class Store {
         return n;
     }
 
+    // ---------- incerteza de envio ----------
+
+    /** Conferencias que travam a rede ate o dono/agente registrar social_resolve_incerteza. */
+    public static final Set<String> CONFERENCIAS_INCERTAS = Set.of("abortado_apos_publico", "duplicata_suspeita");
+    /** Dia padrao da trava (incidente de 11/11: carrossel publicado e abortado depois). */
+    private static final LocalDate TRAVA_INCERTEZA_PADRAO = LocalDate.of(2026, 11, 11);
+
+    /** Inicio do dia (epoch ms, fuso TZ) de defaults.travaIncertezaDesde (yyyy-MM-dd; padrao 2026-11-11). */
+    public long travaIncertezaDesdeMs() {
+        String dia = defaultsCfg().path("travaIncertezaDesde").asText("").trim();
+        try {
+            return (dia.isEmpty() ? TRAVA_INCERTEZA_PADRAO : LocalDate.parse(dia)).atStartOfDay(TZ).toInstant().toEpochMilli();
+        } catch (java.time.format.DateTimeParseException e) {
+            return TRAVA_INCERTEZA_PADRAO.atStartOfDay(TZ).toInstant().toEpochMilli();
+        }
+    }
+
+    /**
+     * Lotes da rede que terminaram com envio incerto ou duplicata suspeita e ainda nao foram
+     * resolvidos: .executed.json com result.conferencia em CONFERENCIAS_INCERTAS, executedAt
+     * (ou createdAt, se faltar) desde o inicio do dia travaIncertezaDesde, sem evento
+     * incerteza_resolvida no journal para o batchId. Ordenado por id. Arquivo ilegivel: ignora.
+     */
+    public List<String> incertezasPendentes(String network) {
+        List<String> out = new ArrayList<>();
+        long desde = travaIncertezaDesdeMs();
+        Set<String> resolvidos = resolvidosIncerteza();
+        if (!Files.isDirectory(batchesDir())) return out;
+        try (var files = Files.list(batchesDir())) {
+            for (Path p : files.filter(f -> f.getFileName().toString().endsWith(".executed.json")).toList()) {
+                try {
+                    JsonNode b = Json.parse(Files.readString(p, StandardCharsets.UTF_8));
+                    if (!network.equals(b.path("network").asText(null))) continue;
+                    if (!CONFERENCIAS_INCERTAS.contains(b.path("result").path("conferencia").asText(""))) continue;
+                    long quando = b.path("executedAt").asLong(b.path("createdAt").asLong(0));
+                    if (quando < desde) continue;
+                    String id = b.path("id").asText("");
+                    if (!id.isBlank() && !resolvidos.contains(id)) out.add(id);
+                } catch (IOException | RuntimeException ignored) {
+                    // arquivo ilegivel: ignora e segue
+                }
+            }
+        } catch (IOException e) {
+            throw new RuntimeException("Falha ao listar lotes executados: " + e.getMessage(), e);
+        }
+        out.sort(String::compareTo);
+        return out;
+    }
+
+    /** batchIds com evento incerteza_resolvida no journal (linha a linha, como batchStarted). */
+    private Set<String> resolvidosIncerteza() {
+        Set<String> out = new HashSet<>();
+        synchronized (journalLock) {
+            try (Trava ignored = lock("journal")) {
+                for (String line : Files.readAllLines(journalPath(), StandardCharsets.UTF_8)) {
+                    if (line.isBlank()) continue;
+                    JsonNode e = Json.parse(line);
+                    if ("incerteza_resolvida".equals(e.path("type").asText())) {
+                        String id = e.path("batchId").asText("");
+                        if (!id.isBlank()) out.add(id);
+                    }
+                }
+            } catch (IOException e) {
+                throw new RuntimeException("Falha ao ler journal: " + e.getMessage(), e);
+            }
+            return out;
+        }
+    }
+
     // ---------- travas entre processos ----------
 
     /**

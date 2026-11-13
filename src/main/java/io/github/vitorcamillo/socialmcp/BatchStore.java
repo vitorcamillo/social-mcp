@@ -51,6 +51,15 @@ public class BatchStore {
     }
 
     public JsonNode draft(String label, JsonNode actions) throws IOException {
+        return draft(label, actions, null);
+    }
+
+    /**
+     * Rascunho com origem declarada pela frente de Tools:
+     * {"receita": "&lt;action&gt;", "provada": true|false}. origem = null e lote cru:
+     * com passo publico, exige ensaio do dono (precisaEnsaio).
+     */
+    public JsonNode draft(String label, JsonNode actions, ObjectNode origem) throws IOException {
         if (actions == null || !actions.isArray() || actions.isEmpty()) {
             throw new IllegalArgumentException("actions deve ser um array nao vazio");
         }
@@ -63,12 +72,27 @@ public class BatchStore {
         batch.put("status", "draft");
         batch.put("network", net);
         batch.set("actions", actions);
+        if (origem != null) batch.set("origem", origem);
         Files.writeString(store.batchesDir().resolve(id + ".draft.json"), Json.writePretty(batch), StandardCharsets.UTF_8);
         store.appendJournal("batch_created", net, Json.obj()
                 .put("batchId", id)
                 .put("label", batch.get("label").asText())
                 .put("acoes", actions.size()));
         return batch;
+    }
+
+    /**
+     * Lote com passo publico que exige ensaio autorizado pelo dono: cru (sem origem) ou de
+     * receita nao provada (origem.provada=false). Lote sem passo publico nunca precisa.
+     */
+    static boolean precisaEnsaio(JsonNode batch) {
+        for (JsonNode a : batch.path("actions")) {
+            if (Guard.isPublic(a.path("kind").asText(""))) {
+                JsonNode origem = batch.path("origem");
+                return !origem.isObject() || !origem.path("provada").asBoolean(false);
+            }
+        }
+        return false;
     }
 
     /**
@@ -910,6 +934,8 @@ public class BatchStore {
      * verify_absent so e forte acompanhado de uma confirmacao positiva da pagina (verify_attr
      * ou verify_text/wait com selector) depois do passo publico: sozinho ele tambem passa numa
      * pagina de login ou ainda vazia, onde o item "sumiu" sem a exclusao ter acontecido.
+     * verify_text/wait com seletor de pagina inteira (main/body/html/article) conta como fraca:
+     * achar texto em qualquer lugar da pagina nao prova o estado de um elemento.
      * fraca = so texto solto na pagina (pode ser o proprio texto digitado ainda no editor) ou
      * verify_absent sem confirmacao positiva; ausente = nada confere; sem_publico = lote sem
      * passo publico.
@@ -937,7 +963,7 @@ public class BatchStore {
             } else if ("verify_absent".equals(k)) {
                 ausencia = true;
             } else if ("verify_text".equals(k) || ("wait".equals(k) && a.hasNonNull("expect"))) {
-                if (comSelector) {
+                if (comSelector && !seletorDePaginaInteira(a.path("selector").asText(""))) {
                     positiva = true;
                 } else {
                     fraca = true;
@@ -947,6 +973,17 @@ public class BatchStore {
         if (positiva) return CONF_FORTE;
         if (ausencia) return CONF_FRACA;
         return fraca ? CONF_FRACA : CONF_AUSENTE;
+    }
+
+    /** Seletores de pagina inteira (apos trim e minusculas): nao provam estado de um elemento. */
+    private static final Set<String> PAGINA_INTEIRA = Set.of(
+            "main", "body", "html", "article",
+            "css:main", "css:body", "css:html", "css:article",
+            "xpath://main", "xpath://body", "xpath://html", "xpath://article",
+            "//main", "//body");
+
+    static boolean seletorDePaginaInteira(String sel) {
+        return sel != null && PAGINA_INTEIRA.contains(sel.trim().toLowerCase(java.util.Locale.ROOT));
     }
 
     /** Request so prova o efeito com expectBody e com status esperados todos 2xx (ou o padrao 2xx). */
@@ -1225,6 +1262,12 @@ public class BatchStore {
             recusar(id, net, "aprovacao_vencida");
             throw new IllegalStateException("aprovacao do lote " + id + " venceu (" + horas + "h); rejeite e reaprove");
         }
+        if (precisaEnsaio(b) && !b.path("ensaioAutorizado").asBoolean(false)) {
+            recusar(id, net, "ensaio_ausente");
+            throw new IllegalStateException("lote " + id + " usa receita nao provada ou acoes cruas com passo publico; "
+                    + "precisa de ensaio autorizado pelo dono no terminal: bin/social-mcp --cli approve " + id
+                    + " humano \"<nota>\" --ensaio");
+        }
         return b;
     }
 
@@ -1234,7 +1277,11 @@ public class BatchStore {
 
     /** Aprovacao com gate de texto obrigatorio e sem fichas de fatos. */
     public String approve(String id, String aprovador, String note) throws IOException {
-        return approve(id, aprovador, note, List.of(), false);
+        return approve(id, aprovador, note, List.of(), false, false);
+    }
+
+    public String approve(String id, String aprovador, String note, List<Path> fichas, boolean forcar) throws IOException {
+        return approve(id, aprovador, note, fichas, forcar, false);
     }
 
     /**
@@ -1242,10 +1289,12 @@ public class BatchStore {
      * o orquestrador ativo. A operadora/agente que executa não tem como aprovar.
      * aprovador: "humano" | "orquestrador" — fica registrado no lote e no journal.
      * O gate de texto roda aqui (fail-closed); so o humano pode forcar sem gate.
+     * ensaio=true grava ensaioAutorizado/ensaioPor no lote e o evento ensaio_autorizado
+     * no journal: e o que destrava execucao de lote cru ou de receita nao provada.
      * O lote aprovado leva o hash das acoes: qualquer edicao posterior invalida a aprovacao.
      * Retorna o resultado do gate (PASS|WARN|FORCADO).
      */
-    public String approve(String id, String aprovador, String note, List<Path> fichas, boolean forcar) throws IOException {
+    public String approve(String id, String aprovador, String note, List<Path> fichas, boolean forcar, boolean ensaio) throws IOException {
         if (!id.matches("[A-Za-z0-9-]+")) throw new IllegalArgumentException("batchId invalido: '" + id + "'");
         // transicao do lote serializada entre processos: sem a trava, reject() pode
         // rejeitar e apagar o rascunho depois da ultima leitura e o approve publica mesmo assim
@@ -1253,11 +1302,11 @@ public class BatchStore {
             if (t == null) {
                 throw new IllegalStateException("lote " + id + " em transicao (aprovacao/rejeicao concorrente); tente de novo");
             }
-            return approveLocked(id, aprovador, note, fichas, forcar);
+            return approveLocked(id, aprovador, note, fichas, forcar, ensaio);
         }
     }
 
-    private String approveLocked(String id, String aprovador, String note, List<Path> fichas, boolean forcar) throws IOException {
+    private String approveLocked(String id, String aprovador, String note, List<Path> fichas, boolean forcar, boolean ensaio) throws IOException {
         Path executed = store.batchesDir().resolve(id + ".executed.json");
         Path approvedAnterior = store.batchesDir().resolve(id + ".approved.json");
         if (Files.exists(executed) || Files.exists(approvedAnterior)) {
@@ -1298,6 +1347,10 @@ public class BatchStore {
         b.put("status", "approved");
         b.put("approvedAt", System.currentTimeMillis());
         b.put("aprovadoPor", por);
+        if (ensaio) {
+            b.put("ensaioAutorizado", true);
+            b.put("ensaioPor", aprovador);
+        }
         if (temNota) b.put("nota", note);
         b.put("actionsHash", TextGate.hashActions(b.path("actions")));
         b.set("midias", vincularMidias(id, b.path("actions")));
@@ -1336,6 +1389,10 @@ public class BatchStore {
         Files.deleteIfExists(approving);
         store.appendJournal("batch_approved", null, Json.obj().put("batchId", id).put("aprovadoPor", por)
                 .put("nota", note == null ? "" : note).put("gate", resultado).put("forcado", forcar));
+        if (ensaio) {
+            store.appendJournal("ensaio_autorizado", null, Json.obj().put("batchId", id)
+                    .put("aprovador", aprovador == null ? "" : aprovador));
+        }
         return resultado;
     }
 
@@ -1470,6 +1527,40 @@ public class BatchStore {
         store.appendJournal("batch_executed", net, Json.obj().put("batchId", id).put("day", store.today())
                 .put("abortado", summary.path("abortado").asBoolean(false))
                 .put("conferencia", summary.path("conferencia").asText("")));
+        promoverProva(id, b, summary, net);
+    }
+
+    /**
+     * Lote nascido de receita com conferencia forte prova a receita: grava network -> receita -> id
+     * em provas.json (le-altera-escreve; provas.json.tmp + move atomico). Falha de I/O nao derruba
+     * o markExecuted: vira evento receita_provada_falhou no journal e a execucao segue.
+     */
+    private void promoverProva(String id, JsonNode b, JsonNode summary, String net) {
+        String receita = b.path("origem").path("receita").asText("");
+        if (receita.isBlank() || !CONF_FORTE.equals(summary.path("conferencia").asText(""))) return;
+        try {
+            if (net == null || net.isBlank()) return;
+            Path provas = store.batchesDir().getParent().resolve("provas.json");
+            ObjectNode raiz = Json.obj();
+            if (Files.isRegularFile(provas)) {
+                JsonNode lido = Json.parse(Files.readString(provas, StandardCharsets.UTF_8));
+                if (lido.isObject()) raiz = (ObjectNode) lido;
+            }
+            JsonNode redeNode = raiz.get(net);
+            ObjectNode rede = redeNode != null && redeNode.isObject() ? (ObjectNode) redeNode : raiz.putObject(net);
+            rede.put(receita, id);
+            Path tmp = provas.resolveSibling("provas.json.tmp");
+            Files.writeString(tmp, Json.writePretty(raiz), StandardCharsets.UTF_8);
+            try {
+                Files.move(tmp, provas, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(tmp, provas, StandardCopyOption.REPLACE_EXISTING);
+            }
+            store.appendJournal("receita_provada", net, Json.obj().put("receita", receita).put("batchId", id));
+        } catch (IOException | RuntimeException e) {
+            store.appendJournal("receita_provada_falhou", net, Json.obj().put("receita", receita)
+                    .put("batchId", id).put("erro", String.valueOf(e.getMessage())));
+        }
     }
 
     private Path writeTemp(ObjectNode b, String tmpName) throws IOException {

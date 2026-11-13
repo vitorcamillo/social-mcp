@@ -393,4 +393,56 @@ class RecipeTest {
             return e.getMessage();
         }
     }
+
+    // ---------- receita provada ----------
+
+    @Test
+    void statusProvadaENaoProvada() {
+        assertTrue(Recipes.receitaProvada(Json.parse(
+                "{\"status\":\"provada 12/11/2026 (lote b1)\"}"), "ig", "create_post", null));
+        assertFalse(Recipes.receitaProvada(Json.parse(
+                "{\"status\":\"mapeada, nao provada\"}"), "ig", "create_post", null));
+        assertFalse(Recipes.receitaProvada(Json.parse(
+                "{\"status\":\"mapeada; prova de resposta obrigatoria; execucao real pendente\"}"), "ig", "create_post", null));
+    }
+
+    @Test
+    void provadaExplicitoVenceOStatus() {
+        assertTrue(Recipes.receitaProvada(Json.parse(
+                "{\"provada\":true,\"status\":\"mapeada, nao provada\"}"), "ig", "create_post", null));
+        assertFalse(Recipes.receitaProvada(Json.parse(
+                "{\"provada\":false,\"status\":\"Provada 12/11\"}"), "ig", "create_post", null));
+    }
+
+    @Test
+    void entradaEmProvasJsonTornaProvada() throws Exception {
+        Path provas = tmp.resolve("provas.json");
+        Files.writeString(provas, "{\"ig\":{\"create_post\":\"b123\"}}", StandardCharsets.UTF_8);
+        assertTrue(Recipes.receitaProvada(Json.obj(), "ig", "create_post", provas));
+        assertFalse(Recipes.receitaProvada(Json.obj(), "ig", "reply", provas));
+        // arquivo ausente ou ilegivel = sem entrada
+        assertFalse(Recipes.receitaProvada(Json.obj(), "ig", "create_post", tmp.resolve("ausente.json")));
+        Files.writeString(tmp.resolve("quebrado.json"), "{nao json", StandardCharsets.UTF_8);
+        assertFalse(Recipes.receitaProvada(Json.obj(), "ig", "create_post", tmp.resolve("quebrado.json")));
+    }
+
+    @Test
+    void readOnlyESempreProvada() {
+        assertTrue(Recipes.receitaProvada(Json.parse(
+                "{\"readOnly\":true,\"status\":\"mapeada, nao provada\"}"), "ig", "list_posts", null));
+    }
+
+    @Test
+    void prepareCarregaProvadaDoStatusEProvas() throws Exception {
+        Store s = storeComReceita();
+        Files.writeString(s.home.resolve("recipes").resolve("instagram.json"), """
+                {"network":"instagram","actions":{
+                  "create_post":{"params":["text"],"textField":"text","status":"provada 12/11/2026 (lote b1)","steps":[
+                    {"kind":"goto","url":"https://www.instagram.com/"}]}}}
+                """, StandardCharsets.UTF_8);
+        Recipes r = new Recipes(s);
+        assertTrue(r.prepare("instagram", "create_post", Json.obj().put("text", "oi")).provada());
+        // pinterest delete_post sem status/provada e sem provas.json = nao provada
+        assertFalse(r.prepare("pinterest", "delete_post", Json.obj().put("postId", "1")).provada());
+    }
 }
