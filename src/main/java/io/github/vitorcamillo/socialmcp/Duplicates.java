@@ -63,14 +63,21 @@ public final class Duplicates {
         // apagou o texto comparavel de toda pagina substancial, as paginas sao praticamente
         // identicas — devolver o texto original para a comparacao (senao a busca devolve zero
         // duplicatas). Interface de verdade sobrevive ao corte em paginas com conteudo proprio.
+        // So vale com originais (normalizados) identicos: legendas distintas curtas apos o corte
+        // nao sao conteudo comum apagado, e sim o resto certo de cada pagina.
         boolean tinhaConteudo = false;
         boolean sobrouConteudo = false;
+        boolean originaisIguais = n > 0;
+        String primeiraNorm = null;
         for (int i = 0; i < n; i++) {
             String original = textos.get(i) == null ? "" : textos.get(i);
-            if (contaPalavras(normalizar(original)) >= MIN_PALAVRAS_COMPARAVEL) tinhaConteudo = true;
+            String normOriginal = normalizar(original);
+            if (primeiraNorm == null) primeiraNorm = normOriginal;
+            else if (!primeiraNorm.equals(normOriginal)) originaisIguais = false;
+            if (contaPalavras(normOriginal) >= MIN_PALAVRAS_COMPARAVEL) tinhaConteudo = true;
             if (contaPalavras(normalizar(out.get(i))) >= MIN_PALAVRAS_COMPARAVEL) sobrouConteudo = true;
         }
-        if (tinhaConteudo && !sobrouConteudo) {
+        if (tinhaConteudo && !sobrouConteudo && originaisIguais) {
             List<String> originais = new ArrayList<>(n);
             for (String texto : textos) originais.add(texto == null ? "" : texto);
             return originais;
