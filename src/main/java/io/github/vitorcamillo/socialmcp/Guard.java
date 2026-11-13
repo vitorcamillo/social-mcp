@@ -101,6 +101,16 @@ public final class Guard {
     static final long DATA_ILEGIVEL = Long.MIN_VALUE;
     private static final long PRAZO_TRIPWIRE_IGNORE_MS = 24 * 3_600_000L;
 
+    /**
+     * Frases inteiras de componente da pagina que contem um padrao de tripwire mas nao sao
+     * bloqueio da conta (revisadas em codigo, sem prazo; o config do agente nao as altera).
+     * So a frase completa sai: "tente novamente mais tarde" solto continua disparando.
+     */
+    static final List<String> FRASES_INOFENSIVAS = List.of(
+            // YouTube Shorts: o botao Compartilhar falha ao carregar os destinos (11/11/2026)
+            "ocorreu um erro ao recuperar informações de compartilhamento. tente novamente mais tarde.",
+            "an error occurred while retrieving sharing information. please try again later.");
+
     /** Epoch ms de um numero (epoch ms) ou texto ISO-8601 com offset; ilegivel = DATA_ILEGIVEL. */
     static long epochMsDe(JsonNode n) {
         if (n == null || n.isNull()) return DATA_ILEGIVEL;
@@ -146,6 +156,7 @@ public final class Guard {
         String lower = pageText.toLowerCase().replaceAll("\\s+", " ");
         // frases conhecidas e inofensivas (ex.: notificacao antiga ja resolvida) saem antes do casamento;
         // cada ignoro tem prazo (criadoEm/expiraEm): vencido, a frase volta a disparar
+        for (String frase : FRASES_INOFENSIVAS) lower = lower.replace(frase, " ");
         JsonNode ignorar = netCfg.path("tripwireIgnore");
         if (ignorar.isArray()) {
             for (JsonNode t : ignorar) {

@@ -149,4 +149,20 @@ class DuplicatesTest {
         assertEquals(List.of("Legenda longa repetida em todos os posts",
                 "Legenda longa repetida em todos os posts"), r);
     }
+
+    @Test
+    void seletorDoItemUsaIdDaUrl() {
+        assertEquals("css:#t1_19s9wlvhjtipx-comment-rtjson-content", Duplicates.seletorDoItem(
+                "https://www.reddit.com/r/x/comments/1xplw07/comment/19s9wlvhjtipx/?context=3",
+                "/comment/([a-z0-9]+)", "css:#t1_{{id}}-comment-rtjson-content"));
+    }
+
+    @Test
+    void seletorDoItemRecusaSemIdOuIdInseguro() {
+        String modelo = "css:#t1_{{id}}-comment-rtjson-content";
+        assertNull(Duplicates.seletorDoItem("https://www.reddit.com/r/x/comments/1xplw07/", "/comment/([a-z0-9]+)", modelo));
+        assertNull(Duplicates.seletorDoItem("https://x/comment/a'],body[x='/", "/comment/([^/]+)", modelo));
+        assertNull(Duplicates.seletorDoItem("https://x/comment/abc/", "/comment/([a-z]+)", "css:sem-placeholder"));
+        assertNull(Duplicates.seletorDoItem("https://x/comment/abc/", "([", modelo));
+    }
 }

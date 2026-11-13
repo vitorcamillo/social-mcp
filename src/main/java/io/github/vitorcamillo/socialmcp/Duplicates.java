@@ -18,6 +18,29 @@ public final class Duplicates {
     public record Pagina(String url, String texto) {}
     public record Grupo(double similaridade, List<String> urls, List<String> inicios) {}
 
+    private static final java.util.regex.Pattern ID_SEGURO = java.util.regex.Pattern.compile("[A-Za-z0-9_-]{1,64}");
+
+    /**
+     * Seletor do item de uma URL listada (receita list_posts.itemTexto): o 1o grupo de idRegex
+     * na URL substitui {{id}} no modelo. Null quando a URL nao tem id, o id tem caractere fora de
+     * [A-Za-z0-9_-] (nao entra em seletor) ou a configuracao esta incompleta/invalida.
+     */
+    static String seletorDoItem(String url, String idRegex, String modelo) {
+        if (url == null || idRegex == null || idRegex.isBlank() || modelo == null || !modelo.contains("{{id}}")) {
+            return null;
+        }
+        java.util.regex.Matcher m;
+        try {
+            m = java.util.regex.Pattern.compile(idRegex).matcher(url);
+        } catch (java.util.regex.PatternSyntaxException e) {
+            return null;
+        }
+        if (!m.find() || m.groupCount() < 1 || m.group(1) == null) return null;
+        String id = m.group(1);
+        if (!ID_SEGURO.matcher(id).matches()) return null;
+        return modelo.replace("{{id}}", id);
+    }
+
     /** Minimo de palavras para uma pagina entrar na comparacao (elegivel em agrupar). */
     static final int MIN_PALAVRAS_COMPARAVEL = 5;
 

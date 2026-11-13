@@ -673,6 +673,13 @@ public class Tools {
             }
             if (urls.size() >= maxPosts) break;
         }
+        // itemTexto (opcional na receita list_posts): compara so o texto do item da URL, nao a
+        // pagina inteira. Ex.: permalink de comentario do Reddit abre a thread toda e comentarios
+        // diferentes na mesma thread pareciam duplicados.
+        JsonNode itemTexto = recipes.load(network).path("actions").path("list_posts").path("itemTexto");
+        String itemIdRegex = itemTexto.path("idRegex").asText("");
+        String itemModelo = itemTexto.path("selector").asText("");
+        boolean porItem = itemTexto.isObject();
         List<Duplicates.Pagina> paginas = new ArrayList<>();
         ArrayNode falhas = Json.M.createArrayNode();
         ObjectNode tmp = Json.obj();
@@ -693,6 +700,27 @@ public class Tools {
                         "padrao de anti-bot no social_find_duplicates: " + url, tmp)) {
                     tripwire = true;
                     break;
+                }
+                if (porItem) {
+                    String sel = Duplicates.seletorDoItem(url, itemIdRegex, itemModelo);
+                    if (sel == null) {
+                        falhas.addObject().put("url", url).put("erro", "itemTexto: URL sem id do item");
+                        continue;
+                    }
+                    String doItem = null;
+                    for (int tentativa = 1; tentativa <= VERIFY_TENTATIVAS && doItem == null; tentativa++) {
+                        try {
+                            doItem = RealClick.text(el(d, sel));
+                        } catch (Exception e) {
+                            if (tentativa < VERIFY_TENTATIVAS) Thread.sleep(1_000);
+                        }
+                    }
+                    if (doItem == null) {
+                        // sem o item, a pagina inteira daria falso positivo: fica de fora e avisa
+                        falhas.addObject().put("url", url).put("erro", "itemTexto: item nao encontrado (" + sel + ")");
+                        continue;
+                    }
+                    texto = doItem;
                 }
                 paginas.add(new Duplicates.Pagina(url, texto));
             } catch (Exception e) {

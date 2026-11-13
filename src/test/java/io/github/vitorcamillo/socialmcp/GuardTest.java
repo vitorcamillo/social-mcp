@@ -152,6 +152,22 @@ class GuardTest {
     private static final String PAGINA_HUMANA = "Para continuar usando o Reddit, verifique se você é humano para continuar.";
 
     @Test
+    void erroDeCompartilharDoShortsNaoEhBloqueio() {
+        ObjectNode cfg = store().networkCfg("youtube");
+        String pagina = "Assistir mais tarde Compartilhar Ocorreu um erro ao recuperar informações de\n"
+                + "compartilhamento. Tente novamente mais tarde. Copiar link";
+        assertNull(Guard.tripwireMatch(pagina, cfg, System.currentTimeMillis()));
+    }
+
+    @Test
+    void tenteNovamenteSoltoContinuaDisparando() {
+        ObjectNode cfg = store().networkCfg("youtube");
+        String pagina = "Ocorreu um erro ao recuperar informações de compartilhamento. Tente novamente mais tarde. "
+                + "Você publicou demais. Tente novamente mais tarde.";
+        assertEquals("tente novamente mais tarde", Guard.tripwireMatch(pagina, cfg, System.currentTimeMillis()));
+    }
+
+    @Test
     void tripwireIgnoreEmTextoPuroNaoIgnoraMais() {
         Store s = store();
         ObjectNode cfg = s.networkCfg("reddit");
