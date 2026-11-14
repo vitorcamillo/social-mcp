@@ -90,7 +90,7 @@ public final class ApprovalCli {
                     if (posicionais.size() > idx) nota = posicionais.get(idx);
                     String comando = "approve " + args[1] + (forcar ? " --forcar" : "") + (ensaio ? " --ensaio" : "");
                     if (forcar || ensaio) {
-                        int g = exigirConfirmacao(comando);
+                        int g = exigirConfirmacao(store, comando);
                         if (g != 0) return g;
                     }
                     registrarCli(store, comando);
@@ -120,7 +120,7 @@ public final class ApprovalCli {
                     String comando = "state " + args[1] + " " + estado;
                     String by = "dono (CLI)";
                     if ("healthy".equals(estado)) {
-                        int g = exigirConfirmacao(comando);
+                        int g = exigirConfirmacao(store, comando);
                         if (g != 0) return g;
                         by = "dono (CLI tty)";
                     }
@@ -167,7 +167,13 @@ public final class ApprovalCli {
      * interativo. Sem TTY (agente) recusa com codigo 2 sem alterar nada; com TTY,
      * qualquer resposta que nao seja CONFIRMO recusa do mesmo jeito.
      */
-    private static int exigirConfirmacao(String comando) {
+    private static int exigirConfirmacao(Store store, String comando) {
+        if (!confirmacaoExigida(store)) {
+            // dono desligou o CONFIRMO em config.json (defaults.exigirConfirmo=false): segue, mas fica no journal
+            store.appendJournal("confirmacao_dispensada", null, Json.obj().put("comando", comando)
+                    .put("tty", terminal.interativo()));
+            return 0;
+        }
         if (!terminal.interativo()) {
             System.err.println("RECUSADO: '" + comando + "' so pelo dono num terminal interativo (sem TTY = agente)");
             return 2;
@@ -178,6 +184,16 @@ public final class ApprovalCli {
             return 2;
         }
         return 0;
+    }
+
+    /** CONFIRMO so deixa de ser exigido com defaults.exigirConfirmo == false (booleano); ausente/invalido = exige. */
+    static boolean confirmacaoExigida(Store store) {
+        try {
+            com.fasterxml.jackson.databind.JsonNode v = store.defaultsCfg().get("exigirConfirmo");
+            return !(v != null && v.isBoolean() && !v.asBoolean());
+        } catch (RuntimeException e) {
+            return true;
+        }
     }
 
     /** Trilha de quem chamou a CLI: comando, usuario, se havia TTY e o processo pai. */

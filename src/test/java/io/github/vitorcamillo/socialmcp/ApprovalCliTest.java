@@ -68,6 +68,29 @@ class ApprovalCliTest {
     }
 
     @Test
+    void exigirConfirmoFalseNoConfigDispensaTerminalEFicaNoJournal() throws Exception {
+        Store s = storeNovo();
+        com.fasterxml.jackson.databind.node.ObjectNode cfg = (com.fasterxml.jackson.databind.node.ObjectNode) s.config();
+        cfg.with("defaults").put("exigirConfirmo", false);
+        Files.writeString(s.configPath(), Json.writePretty(cfg));
+        ApprovalCli.terminal = terminalFixo(false, "");
+        int code = ApprovalCli.run(new String[]{"state", "bluesky", "healthy", "rotina"}, s);
+        assertEquals(0, code);
+        assertEquals("healthy", s.health().path("bluesky").path("state").asText());
+        assertTrue(String.join("\n", s.tail(5)).contains("confirmacao_dispensada"));
+    }
+
+    @Test
+    void exigirConfirmoAusenteOuInvalidoContinuaExigindo() throws Exception {
+        Store s = storeNovo();
+        assertTrue(ApprovalCli.confirmacaoExigida(s));
+        com.fasterxml.jackson.databind.node.ObjectNode cfg = (com.fasterxml.jackson.databind.node.ObjectNode) s.config();
+        cfg.with("defaults").put("exigirConfirmo", "false");
+        Files.writeString(s.configPath(), Json.writePretty(cfg));
+        assertTrue(ApprovalCli.confirmacaoExigida(s), "texto 'false' nao desliga; so booleano");
+    }
+
+    @Test
     void stateHealthyComConfirmoMudaETrilhaCliChamada() throws Exception {
         Store s = storeNovo();
         ApprovalCli.terminal = terminalFixo(true, "CONFIRMO");
