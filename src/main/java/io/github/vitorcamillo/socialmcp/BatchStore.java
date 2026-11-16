@@ -159,6 +159,10 @@ public class BatchStore {
         if (a.has("ifPresent") && !"click".equals(kind)) {
             throw new IllegalArgumentException("acao " + idx + ": ifPresent so vale em click");
         }
+        if (a.has("allowExisting") || "type".equals(kind)) validateAllowExisting(a, idx);
+        if (a.has("exact") && !"verify_text".equals(kind)) {
+            throw new IllegalArgumentException("acao " + idx + ": exact so vale em verify_text");
+        }
         switch (kind) {
             case "goto" -> {
                 String url = a.path("url").asText("");
@@ -173,9 +177,7 @@ public class BatchStore {
             case "type", "key" -> {
                 if (!a.has("text")) throw new IllegalArgumentException("acao " + idx + ": " + kind + " exige text");
             }
-            case "verify_text" -> {
-                if (a.path("expect").asText("").isBlank()) throw new IllegalArgumentException("acao " + idx + ": verify_text exige expect");
-            }
+            case "verify_text" -> validateVerifyText(a, idx);
             case "verify_attr" -> validateVerifyAttr(a, idx);
             case "verify_absent" -> validateVerifyAbsent(a, idx);
             case "capture_ids" -> validateCaptureIds(a, idx);
@@ -611,6 +613,32 @@ public class BatchStore {
             throw new IllegalArgumentException(p + "exige attr (nome de atributo, ex.: aria-checked)");
         }
         if (!a.path("expect").isTextual()) throw new IllegalArgumentException(p + "exige expect (texto exato do atributo)");
+    }
+
+    /** verify_text: expect obrigatorio; exact, se presente, booleano, e exact=true exige selector. */
+    static void validateVerifyText(JsonNode a, int idx) {
+        if (a.path("expect").asText("").isBlank()) throw new IllegalArgumentException("acao " + idx + ": verify_text exige expect");
+        if (a.has("exact")) {
+            if (!a.get("exact").isBoolean()) throw new IllegalArgumentException("acao " + idx + ": verify_text exact tem que ser booleano");
+            if (a.get("exact").asBoolean() && a.path("selector").asText("").isBlank()) {
+                throw new IllegalArgumentException("acao " + idx + ": verify_text exact exige selector (texto do elemento, nao da pagina)");
+            }
+        }
+    }
+
+    /** type: allowExisting opcional, regex valida de ate 200 chars; so vale em type. */
+    static void validateAllowExisting(JsonNode a, int idx) {
+        if (!a.has("allowExisting")) return;
+        if (!"type".equals(a.path("kind").asText(""))) throw new IllegalArgumentException("acao " + idx + ": allowExisting so vale em type");
+        JsonNode v = a.get("allowExisting");
+        if (!v.isTextual() || v.asText().isBlank() || v.asText().length() > 200) {
+            throw new IllegalArgumentException("acao " + idx + ": allowExisting exige regex (1..200 chars)");
+        }
+        try {
+            java.util.regex.Pattern.compile(v.asText());
+        } catch (java.util.regex.PatternSyntaxException e) {
+            throw new IllegalArgumentException("acao " + idx + ": allowExisting regex invalida: " + e.getDescription());
+        }
     }
 
     /** {@code xpath:} sem expressao: a string nao esta em branco, mas a consulta sim. */

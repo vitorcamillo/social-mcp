@@ -224,9 +224,7 @@ public class Recipes {
                 case "goto" -> {
                     if (s.path("url").asText("").isBlank()) throw new IllegalArgumentException("passo " + i + ": goto exige url");
                 }
-                case "verify_text" -> {
-                    if (s.path("expect").asText("").isBlank()) throw new IllegalArgumentException("passo " + i + ": verify_text exige expect");
-                }
+                case "verify_text" -> BatchStore.validateVerifyText(s, i);
                 case "extract" -> BatchStore.validateExtract(s, i);
                 case "verify_attr" -> BatchStore.validateVerifyAttr(s, i);
                 case "verify_absent" -> BatchStore.validateVerifyAbsent(s, i);

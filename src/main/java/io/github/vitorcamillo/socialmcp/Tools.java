@@ -1315,6 +1315,8 @@ public class Tools {
                         throw falhaFocoAposClique(sel);
                     }
                 }
+                // nunca digitar com sobra: campo vazio, todo selecionado (ctrl+a) ou allowExisting
+                CampoTexto.conferirAntesDeDigitar(d::executeScript, a.path("allowExisting").asText(""));
                 String text = a.path("text").asText();
                 ObjectNode cfg = store.networkCfg(network);
                 String modo = TypeText.mode(cfg);
@@ -1383,12 +1385,17 @@ public class Tools {
 
     /**
      * verify_text: sem selector, a pagina inteira contem expect; com selector, o texto DO
-     * elemento (com shadow DOM dentro dele) contem expect. Tolera SPA ainda carregando: ate 3
+     * elemento (com shadow DOM dentro dele) contem expect. exact=true exige texto do elemento
+     * igual a expect, so espacos normalizados. Tolera SPA ainda carregando: ate 3
      * leituras com 1 s entre elas.
      */
     private String runVerifyText(JavaDriverless d, JsonNode a) throws Exception {
         String expect = a.path("expect").asText();
         String sel = a.path("selector").asText("");
+        boolean exact = a.path("exact").asBoolean(false);
+        if (exact && sel.isBlank()) {
+            throw new IllegalArgumentException("verify_text exact exige selector");
+        }
         String visto = "";
         for (int tentativa = 1; tentativa <= VERIFY_TENTATIVAS; tentativa++) {
             if (sel.isBlank()) {
@@ -1396,7 +1403,7 @@ public class Tools {
             } else {
                 try {
                     visto = RealClick.text(el(d, sel));
-                    if (visto.contains(expect)) return "texto verificado no elemento";
+                    if (textoConfere(visto, expect, exact)) return exact ? "texto exato verificado no elemento" : "texto verificado no elemento";
                 } catch (Exception e) {
                     visto = "(elemento indisponivel: " + e.getMessage() + ")";
                 }
@@ -1407,8 +1414,13 @@ public class Tools {
             throw new IllegalStateException("verify_text falhou: '" + expect + "' nao encontrado na pagina ("
                     + VERIFY_TENTATIVAS + " tentativas)");
         }
-        throw new IllegalStateException("verify_text falhou: elemento '" + sel + "' nao contem '" + expect
+        throw new IllegalStateException("verify_text falhou: elemento '" + sel + "' " + (exact ? "nao e exatamente '" : "nao contem '") + expect
                 + "' (texto: '" + corta(visto, 120) + "'; " + VERIFY_TENTATIVAS + " tentativas)");
+    }
+
+    /** exact: texto do elemento igual a expect (so espacos normalizados); senao basta conter. */
+    static boolean textoConfere(String visto, String expect, boolean exact) {
+        return exact ? CampoTexto.normaliza(visto).equals(CampoTexto.normaliza(expect)) : visto.contains(expect);
     }
 
     /** verify_attr: o atributo attr do elemento e exatamente expect (ate 3 leituras, 1 s entre elas). */
@@ -2181,6 +2193,8 @@ public class Tools {
                           "paths": { "type": "array", "minItems": 2, "maxItems": 10, "items": { "type": "string" }, "description": "set_file: 2..10 caminhos absolutos dentro de defaults.uploadRoots, enviados juntos na ordem" },
                           "text": { "type": "string" },
                           "expect": { "type": "string", "description": "verify_text: substring que deve existir na pagina, ou no texto do elemento quando ha selector (prova de estado: ex. #done-button contem 'Publicar'); verify_attr: valor EXATO do atributo (ex.: 'true'); ate 3 leituras, 1 s entre elas. verify_absent (opcional): so conta elementos cujo texto contem expect (ex.: a linha da lista com o id apagado). wait: espera ate o texto aparecer. verify_new_id (opcional): o texto do ITEM novo (innerText/textContent + alt/aria-label do item e descendentes) precisa conter expect; com responseProof=true, expect do verify e o texto aprovado completo ou trecho dele com ao menos 8 chars" },
+                          "exact": { "type": "boolean", "description": "verify_text com selector: true = o texto do elemento tem que ser IGUAL a expect (so espacos normalizados), nao so conter; use no pos-envio para pegar sobra no campo" },
+                          "allowExisting": { "type": "string", "description": "type: regex Java (ate 200 chars) que o texto ja presente no campo focado pode casar INTEIRO (ex.: mencao pre-preenchida). Sem ele, o type aborta se o campo nao estiver vazio nem todo selecionado" },
                           "responseProof": { "type": "boolean", "description": "capture_ids/verify_new_id: true = prova de resposta opt-in (ig|tt|yt|facebook|bluesky|mastodon|x|pinterest|reddit): capture exige expect 8..2200; verify exige mesmo responseProof e expect igual ou trecho (>= 8 chars); o lote precisa de type ou request POST posterior com o texto exato do capture" },
                           "method": { "type": "string", "description": "request: POST|PUT|PATCH|DELETE (fetch dentro da pagina logada; conta como acao publica)" },
                           "headers": { "type": "object", "description": "request: headers extras literais (cookie proibido: a sessao e a do navegador; token de usuario vai em auth, nunca aqui)" },
