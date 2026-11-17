@@ -1,5 +1,9 @@
 # Social MCP
 
+![Demonstração do social-mcp](docs/demo.png)
+
+*Um rascunho de post criado pelo MCP fica parado: sem gate de texto configurado, a aprovação é bloqueada e nada é publicado.*
+
 O Social MCP é um servidor MCP em Java 21 para operar sessões de redes sociais em um Chrome desktop real por meio do [javaDriveless](https://github.com/vitorcamillo/javaDriveless). Ele mantém um perfil de navegador por rede e separa a navegação somente para leitura das ações públicas.
 
 O servidor é deliberadamente conservador: as ações públicas são preparadas em um lote, verificadas contra as cotas e os disjuntores de cada rede e só podem ser executadas depois de uma aprovação explícita no terminal. Um kill switch e um journal somente de acréscimo oferecem controle operacional local. Este projeto não contorna CAPTCHAs, sistemas antispam, restrições de contas nem regras de plataformas. Use-o somente com contas que você controla e siga os termos de cada plataforma.
