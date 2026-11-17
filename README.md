@@ -1,5 +1,9 @@
 # Social MCP
 
+![MIT](https://img.shields.io/badge/licen%C3%A7a-MIT-green) ![Java](https://img.shields.io/badge/Java-21-ED8B00?logo=openjdk&logoColor=white) ![MCP](https://img.shields.io/badge/MCP-server-6E56CF)
+
+**In English:** an MCP server that lets AI agents read and draft social media actions in a real Chrome, while every public action needs explicit human approval, per-network quotas and a kill switch.
+
 ![Demonstração do social-mcp](docs/demo.png)
 
 *Um rascunho de post criado pelo MCP fica parado: sem gate de texto configurado, a aprovação é bloqueada e nada é publicado.*
