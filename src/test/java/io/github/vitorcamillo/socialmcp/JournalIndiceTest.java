@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
@@ -13,15 +14,19 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -142,6 +147,14 @@ class JournalIndiceTest {
         e.put("cls", "public");
         e.put("batchId", batchId);
         return Json.write(e);
+    }
+
+    private static long ctimeMs(Path j) {
+        try {
+            return ((FileTime) Files.getAttribute(j, "unix:ctime")).toMillis();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
     // ---------- 1. aleatorio ----------
@@ -599,7 +612,11 @@ class JournalIndiceTest {
         String v = linha("x", "", HOJE, 100);
         String c = "{\"type\":\"action\",\"cls\":\"public\",";
         Files.writeString(j, v + "\n" + c + "\n", StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+        int resetsAntes = idx.resets();
         assertThrows(RuntimeException.class, () -> idx.atualizar(HOJE));
+        assertEquals(resetsAntes + 1, idx.resets(), "falha zera o indice na hora (fail-closed)");
+        assertEquals(0, idx.offset());
+        assertFalse(idx.loteIniciado("b0"), "nada agregado sobrevive a falha");
 
         long limite = base.getBytes(StandardCharsets.UTF_8).length + v.getBytes(StandardCharsets.UTF_8).length + 1L;
         try (FileChannel ch = FileChannel.open(j, StandardOpenOption.WRITE)) {
@@ -754,5 +771,176 @@ class JournalIndiceTest {
         lidos[0] = 0;
         assertEquals(List.of(), JournalIndice.ultimasLinhas(j, 0, lidos));
         assertEquals(0, lidos[0], "n=0 nao le o arquivo");
+    }
+
+    // ---------- 10. conferencia do prefixo por CRC32C ----------
+
+    @Test
+    void edicaoNoMeioMesmoTamanhoEMesmaCaudaReseta() throws Exception {
+        Path j = novoJournal("crc-meio.jsonl");
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 4; i++) sb.append(linha("x", "m" + i, HOJE, 100 + i)).append('\n');
+        Files.writeString(j, sb, StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+        JournalIndice idx = new JournalIndice(j);
+        assertIgualAoOraculo(idx, j, HOJE);
+        int resets = idx.resets();
+        long tamanho = Files.size(j);
+        String textoAntes = new String(Files.readAllBytes(j), StandardCharsets.UTF_8);
+
+        // troca "m0" -> "n0" na PRIMEIRA linha, no lugar, sem mudar o tamanho
+        int pos = textoAntes.indexOf("\"m0\"") + 1;
+        assertTrue(pos > 0 && pos < tamanho - 64, "edicao fora dos ultimos 64 bytes");
+        try (FileChannel ch = FileChannel.open(j, StandardOpenOption.WRITE)) {
+            ch.write(ByteBuffer.wrap(new byte[] {'n'}), pos);
+        }
+        assertEquals(tamanho, Files.size(j), "edicao mantem o tamanho");
+        String textoDepois = new String(Files.readAllBytes(j), StandardCharsets.UTF_8);
+        assertEquals(textoAntes.substring(textoAntes.length() - 64),
+                textoDepois.substring(textoDepois.length() - 64), "os ultimos 64 bytes ficam iguais");
+
+        assertIgualAoOraculo(idx, j, HOJE);
+        assertEquals(resets + 1, idx.resets(), "edicao no meio reseta");
+        assertTrue(idx.loteIniciado("n0"));
+        assertFalse(idx.loteIniciado("m0"));
+
+        // o CRC recomeca no reset: a releitura completa vira a nova base e nao reseta de novo
+        assertIgualAoOraculo(idx, j, HOJE);
+        assertEquals(resets + 1, idx.resets(), "sem mudanca, o prefixo relido confere");
+    }
+
+    @Test
+    void estavelSemMudancaNaoConfere() throws Exception {
+        Path j = novoJournal("crc-estavel.jsonl");
+        Files.writeString(j, linha("x", "m0", HOJE, 100) + "\n",
+                StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+        AtomicLong delta = new AtomicLong(JournalIndice.MARGEM_CTIME_MS + 1000);
+        JournalIndice idx = new JournalIndice(j, () -> ctimeMs(j) + delta.get());
+
+        idx.atualizar(HOJE);
+        assertEquals(0, idx.bytesVerificados(), "prefixo vazio na primeira leitura");
+        int resets = idx.resets();
+
+        idx.atualizar(HOJE);
+        assertEquals(0, idx.bytesVerificados(), "ctime estavel nao confere");
+        assertEquals(resets, idx.resets());
+
+        String novo = linha("x", "m1", HOJE, 101) + "\n";
+        int k = novo.getBytes(StandardCharsets.UTF_8).length;
+        long antesDoAppend = Files.size(j);
+        long lidos = idx.bytesLidos();
+        long ctimeAntes = ctimeMs(j);
+        Thread.sleep(50);
+        Files.writeString(j, novo, StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+        assertNotEquals(ctimeAntes, ctimeMs(j), "o kernel mudou o ctime");
+
+        idx.atualizar(HOJE);
+        assertEquals(antesDoAppend, idx.bytesVerificados(), "confere exatamente o prefixo ja lido");
+        assertEquals(resets, idx.resets());
+        assertEquals(lidos + k, idx.bytesLidos(), "append le so os bytes novos");
+
+        long verificados = idx.bytesVerificados();
+        idx.atualizar(HOJE);
+        assertEquals(verificados, idx.bytesVerificados(), "sem mudanca nao confere de novo");
+        assertEquals(resets, idx.resets());
+    }
+
+    @Test
+    void estavelEdicaoNoMeioReseta() throws Exception {
+        Path j = novoJournal("crc-estavel-edicao.jsonl");
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 4; i++) sb.append(linha("x", "m" + i, HOJE, 100 + i)).append('\n');
+        Files.writeString(j, sb, StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+        AtomicLong delta = new AtomicLong(JournalIndice.MARGEM_CTIME_MS + 1000);
+        JournalIndice idx = new JournalIndice(j, () -> ctimeMs(j) + delta.get());
+        assertIgualAoOraculo(idx, j, HOJE);
+        int resets = idx.resets();
+
+        // edicao no meio, mesmo tamanho
+        long ctimeAntes = ctimeMs(j);
+        Thread.sleep(50);
+        byte[] conteudo = Files.readAllBytes(j);
+        String texto = new String(conteudo, StandardCharsets.UTF_8);
+        int pos = texto.indexOf("\"m0\"") + 1;
+        try (FileChannel ch = FileChannel.open(j, StandardOpenOption.WRITE)) {
+            ch.write(ByteBuffer.wrap(new byte[] {'n'}), pos);
+        }
+        assertNotEquals(ctimeAntes, ctimeMs(j), "o kernel mudou o ctime");
+        assertEquals((long) conteudo.length, Files.size(j));
+
+        assertIgualAoOraculo(idx, j, HOJE);
+        assertEquals(resets + 1, idx.resets(), "edicao no meio com ctime estavel reseta");
+        assertTrue(idx.loteIniciado("n0"));
+        assertFalse(idx.loteIniciado("m0"));
+
+        // edicao no meio + append de uma linha nova na mesma modificacao logica
+        resets = idx.resets();
+        ctimeAntes = ctimeMs(j);
+        Thread.sleep(50);
+        conteudo = Files.readAllBytes(j);
+        texto = new String(conteudo, StandardCharsets.UTF_8);
+        pos = texto.indexOf("\"m1\"") + 1;
+        try (FileChannel ch = FileChannel.open(j, StandardOpenOption.WRITE)) {
+            ch.write(ByteBuffer.wrap(new byte[] {'o'}), pos);
+        }
+        Files.writeString(j, linha("x", "m4", HOJE, 200) + "\n",
+                StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+        assertNotEquals(ctimeAntes, ctimeMs(j), "o kernel mudou o ctime");
+
+        assertIgualAoOraculo(idx, j, HOJE);
+        assertEquals(resets + 1, idx.resets(), "edicao no meio mais append reseta");
+        assertTrue(idx.loteIniciado("o1"));
+        assertFalse(idx.loteIniciado("m1"));
+    }
+
+    @Test
+    void margemFinaSoComFracaoDeMilissegundo() {
+        assertEquals(JournalIndice.MARGEM_CTIME_MS, JournalIndice.margem(FileTime.fromMillis(1_763_678_527_000L)));
+        assertEquals(JournalIndice.MARGEM_CTIME_MS, JournalIndice.margem(FileTime.fromMillis(1_763_678_527_123L)));
+        assertEquals(JournalIndice.MARGEM_CTIME_FINO_MS,
+                JournalIndice.margem(FileTime.from(1_763_678_527_123_456_789L, TimeUnit.NANOSECONDS)));
+        assertEquals(JournalIndice.MARGEM_CTIME_FINO_MS,
+                JournalIndice.margem(FileTime.from(1_000_001L, TimeUnit.NANOSECONDS)));
+    }
+
+    @Test
+    void ctimeRecenteConfereDeNovo() throws Exception {
+        Path j = novoJournal("crc-recente.jsonl");
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 3; i++) sb.append(linha("x", "m" + i, HOJE, 100 + i)).append('\n');
+        Files.writeString(j, sb, StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+        long tamanho = Files.size(j);
+        long margem = JournalIndice.margem((FileTime) Files.getAttribute(j, "unix:ctime"));
+        AtomicLong delta = new AtomicLong(margem);
+        JournalIndice idx = new JournalIndice(j, () -> ctimeMs(j) + delta.get());
+
+        idx.atualizar(HOJE);
+        int resets = idx.resets();
+        idx.atualizar(HOJE);
+        assertEquals(tamanho, idx.bytesVerificados(), "ctime na fronteira ainda confere");
+        assertEquals(resets, idx.resets());
+
+        delta.set(margem + 1);
+        idx.atualizar(HOJE);
+        assertEquals(2 * tamanho, idx.bytesVerificados(), "ctimeVisto nulo confere mais uma vez");
+        assertEquals(resets, idx.resets());
+
+        idx.atualizar(HOJE);
+        assertEquals(2 * tamanho, idx.bytesVerificados(), "ctime estavel para de conferir");
+        assertEquals(resets, idx.resets());
+    }
+
+    @Test
+    void appendSemCtimeEstavelNaoReseta() throws Exception {
+        Path j = novoJournal("crc-append.jsonl");
+        JournalIndice idx = new JournalIndice(j);
+        idx.atualizar(HOJE); // 1a leitura: fileKey ainda desconhecido conta um reset
+        int base = idx.resets();
+        for (int i = 0; i < 5; i++) {
+            Files.writeString(j, linha("x", "m" + i, HOJE, 100 + i) + "\n",
+                    StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+            assertIgualAoOraculo(idx, j, HOJE);
+            assertEquals(base, idx.resets(), "append nao pode gerar reset falso (rodada " + i + ")");
+        }
+        assertTrue(idx.bytesVerificados() > 0, "ctime recente: o prefixo foi conferido nos appends");
     }
 }

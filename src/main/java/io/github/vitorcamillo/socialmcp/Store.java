@@ -64,8 +64,12 @@ public class Store {
     }
 
     public static Path defaultHome() {
-        String env = System.getenv("SOCIAL_MCP_HOME");
-        return Paths.get(env != null && !env.isBlank() ? env : System.getProperty("user.home") + "/.social-mcp-public");
+        return defaultHome(System.getenv("SOCIAL_MCP_HOME"), System.getProperty("user.home"));
+    }
+
+    /** Diretorio padrao: SOCIAL_MCP_HOME (se nao vazio) ou &lt;userHome&gt;/.social-mcp-public. */
+    static Path defaultHome(String env, String userHome) {
+        return Paths.get(env != null && !env.isBlank() ? env : userHome + "/.social-mcp-public");
     }
 
     public Path configPath() { return home.resolve("config.json"); }
@@ -338,23 +342,24 @@ public class Store {
         List<String> out = new ArrayList<>();
         long desde = travaIncertezaDesdeMs();
         Set<String> resolvidos = resolvidosIncerteza();
-        if (!Files.isDirectory(batchesDir())) return out;
-        try (var files = Files.list(batchesDir())) {
-            for (Path p : files.filter(f -> f.getFileName().toString().endsWith(".executed.json")).toList()) {
-                try {
-                    JsonNode b = Json.parse(Files.readString(p, StandardCharsets.UTF_8));
-                    if (!network.equals(b.path("network").asText(null))) continue;
-                    if (!CONFERENCIAS_INCERTAS.contains(b.path("result").path("conferencia").asText(""))) continue;
-                    long quando = b.path("executedAt").asLong(b.path("createdAt").asLong(0));
-                    if (quando < desde) continue;
-                    String id = b.path("id").asText("");
-                    if (!id.isBlank() && !resolvidos.contains(id)) out.add(id);
-                } catch (IOException | RuntimeException ignored) {
-                    // arquivo ilegivel: ignora e segue
+        if (Files.isDirectory(batchesDir())) {
+            try (var files = Files.list(batchesDir())) {
+                for (Path p : files.filter(f -> f.getFileName().toString().endsWith(".executed.json")).toList()) {
+                    try {
+                        JsonNode b = Json.parse(Files.readString(p, StandardCharsets.UTF_8));
+                        if (!network.equals(b.path("network").asText(null))) continue;
+                        if (!CONFERENCIAS_INCERTAS.contains(b.path("result").path("conferencia").asText(""))) continue;
+                        long quando = b.path("executedAt").asLong(b.path("createdAt").asLong(0));
+                        if (quando < desde) continue;
+                        String id = b.path("id").asText("");
+                        if (!id.isBlank() && !resolvidos.contains(id)) out.add(id);
+                    } catch (IOException | RuntimeException ignored) {
+                        // arquivo ilegivel: ignora e segue
+                    }
                 }
+            } catch (IOException e) {
+                throw new RuntimeException("Falha ao listar lotes executados: " + e.getMessage(), e);
             }
-        } catch (IOException e) {
-            throw new RuntimeException("Falha ao listar lotes executados: " + e.getMessage(), e);
         }
         out.sort(String::compareTo);
         return out;
@@ -407,20 +412,20 @@ public class Store {
 
         @Override
         public void close() throws IOException {
-            try {
-                lock.release();
-            } finally {
-                try {
-                    ch.close();
-                } finally {
-                    fila.release();
-                    soltarReferencia(chave);
-                }
+            // fechar o canal solta o FileLock; a fila desta JVM e liberada mesmo se o close falhar
+            try (java.io.Closeable liberar = () -> soltarFila(fila, chave)) {
+                ch.close();
             }
         }
     }
 
-    private FileChannel lockChannel(String nome) throws IOException {
+    /** Devolve a vaga da fila desta JVM e a referencia tomada em semaforoDe. */
+    private static void soltarFila(java.util.concurrent.Semaphore fila, String chave) {
+        fila.release();
+        soltarReferencia(chave);
+    }
+
+    FileChannel lockChannel(String nome) throws IOException {
         if (!nome.matches("[A-Za-z0-9_.-]+")) throw new IllegalArgumentException("nome de trava invalido: " + nome);
         Files.createDirectories(locksDir());
         return FileChannel.open(locksDir().resolve(nome + ".lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
@@ -440,6 +445,14 @@ public class Store {
         return home.toRealPath().resolve("locks").resolve(nome + ".lock").toString();
     }
 
+    /** A fila desta JVM para a trava ainda tem usuarios? (teste: nenhuma referencia vazada) */
+    boolean filaRegistrada(String nome) throws IOException {
+        String chave = chaveDaTrava(nome);
+        synchronized (Store.class) {
+            return SEMAFOROS.containsKey(chave);
+        }
+    }
+
     /** Trava bloqueante (espera o outro processo — ou outra thread desta JVM — soltar). */
     public Trava lock(String nome) throws IOException {
         String chave = chaveDaTrava(nome);
@@ -455,16 +468,14 @@ public class Store {
         try {
             ch = lockChannel(nome);
         } catch (IOException | RuntimeException e) {
-            fila.release();
-            soltarReferencia(chave);
+            soltarFila(fila, chave);
             throw e;
         }
         try {
             return new Trava(ch, ch.lock(), fila, chave);
         } catch (IOException | RuntimeException e) {
             fechaCanal(ch);
-            fila.release();
-            soltarReferencia(chave);
+            soltarFila(fila, chave);
             throw e;
         }
     }
@@ -481,28 +492,24 @@ public class Store {
         try {
             ch = lockChannel(nome);
         } catch (IOException | RuntimeException e) {
-            fila.release();
-            soltarReferencia(chave);
+            soltarFila(fila, chave);
             throw e;
         }
         try {
             FileLock l = ch.tryLock();
             if (l == null) {
                 fechaCanal(ch);
-                fila.release();
-                soltarReferencia(chave);
+                soltarFila(fila, chave);
                 return null;
             }
             return new Trava(ch, l, fila, chave);
         } catch (OverlappingFileLockException e) {
             fechaCanal(ch);
-            fila.release();
-            soltarReferencia(chave);
+            soltarFila(fila, chave);
             return null;
         } catch (IOException | RuntimeException e) {
             fechaCanal(ch);
-            fila.release();
-            soltarReferencia(chave);
+            soltarFila(fila, chave);
             throw e;
         }
     }

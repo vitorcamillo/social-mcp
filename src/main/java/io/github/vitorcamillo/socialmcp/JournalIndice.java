@@ -5,9 +5,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.StringReader;
+import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.charset.StandardCharsets;
@@ -15,6 +17,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -23,6 +26,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
+import java.util.zip.CRC32C;
+import java.util.zip.CheckedInputStream;
 
 /**
  * Indice incremental do journal.jsonl: cada consulta le so os bytes novos desde a ultima
@@ -30,24 +37,41 @@ import java.util.Set;
  * O resultado equivale a percorrer o arquivo inteiro a cada chamada. O maior ts por rede
  * guarda uma entrada por lote aprovado (como os lotes com acao), nunca uma por linha.
  *
+ * <p>Integridade: a cada mudanca de ctime (ou ctime ainda dentro da margem de tique) o prefixo
+ * ja lido e conferido por CRC32C, sem parse. Assim uma edicao em qualquer ponto do arquivo
+ * provoca releitura completa em vez de passar despercebida.
+ *
  * <p>Nao e thread-safe sozinho: o Store so a usa dentro de
  * {@code synchronized (journalLock)} + {@code lock("journal")}.
  */
 final class JournalIndice {
     private static final int BLOCO = 64 * 1024;
-    private static final int CAUDA = 64;
+    /** Escrita a menos disso do ctime visto pode cair no mesmo tique de timestamp: confere de novo. */
+    static final long MARGEM_CTIME_MS = 2000;
+    /** FS com ctime abaixo de 1 ms (ext4, xfs, btrfs, tmpfs) usa o relogio grosso do kernel: tique <= 10 ms. */
+    static final long MARGEM_CTIME_FINO_MS = 20;
+
+    /** Margem do ctime: fina se o FS guarda fracao de milissegundo; senao assume timestamp grosso (ate 2 s). */
+    static long margem(FileTime ctime) {
+        return ctime.to(TimeUnit.NANOSECONDS) % 1_000_000 != 0 ? MARGEM_CTIME_FINO_MS : MARGEM_CTIME_MS;
+    }
     private static final String TOKEN_ACTION = "action";
     private static final String TOKEN_BATCH = "batch_executed";
     private static final String TOKEN_INCERTEZA = "incerteza_resolvida";
 
     private final Path journal;
+    private final LongSupplier relogio;
+    /** CRC32C dos bytes [0, offset) ja agregados. */
+    private final CRC32C crc = new CRC32C();
 
     private long offset;
     private Object fileKey;
-    private byte[] cauda = new byte[0];
     private boolean fragmento;
     private String ultimoHoje;
+    /** ctime confiavel da ultima leitura; null = conferir o prefixo na proxima consulta. */
+    private FileTime ctimeVisto;
     long bytesLidos;
+    long bytesVerificados;   // so para teste, NAO zerado pelo reset (como bytesLidos)
     int resets;
 
     private final Set<String> lotesComAcao = new HashSet<>();
@@ -56,25 +80,33 @@ final class JournalIndice {
     private final Map<String, Dia> porDia = new HashMap<>();
 
     JournalIndice(Path journal) {
+        this(journal, System::currentTimeMillis);
+    }
+
+    JournalIndice(Path journal, LongSupplier relogio) {
         this.journal = journal;
+        this.relogio = relogio;
     }
 
     /** Le o que entrou desde a ultima leitura. Toda consulta abaixo chama isto antes. */
     void atualizar(String hoje) throws IOException {
         try {
+            long agora = relogio.getAsLong();
             if (ultimoHoje != null && hoje.compareTo(ultimoHoje) < 0) reset();
             ultimoHoje = hoje;
 
             BasicFileAttributes attrs = Files.readAttributes(journal, BasicFileAttributes.class);
             long tamanho = attrs.size();
             Object fk = attrs.fileKey();
+            FileTime ctime = ctime();
             boolean resetar = tamanho < offset
                     || !Objects.equals(fk, fileKey)
                     || (fragmento && tamanho != offset)
-                    || !Arrays.equals(lerBytes(offset - cauda.length, cauda.length), cauda);
+                    || ((ctimeVisto == null || !ctimeVisto.equals(ctime)) && !prefixoConfere());
             if (resetar) reset();
             if (tamanho != offset) ler();
             fileKey = fk;
+            ctimeVisto = ctime != null && ctime.toMillis() < agora - margem(ctime) ? ctime : null;
             porDia.keySet().removeIf(k -> k.compareTo(hoje) < 0);
         } catch (IOException | RuntimeException e) {
             reset();
@@ -131,25 +163,48 @@ final class JournalIndice {
         return bytesLidos;
     }
 
+    long bytesVerificados() {
+        return bytesVerificados;
+    }
+
     int resets() {
         return resets;
     }
 
     // ---------- leitura incremental ----------
 
-    /** Ate n bytes a partir de pos (menos se o arquivo acabar antes). */
-    private byte[] lerBytes(long pos, int n) throws IOException {
-        try (SeekableByteChannel ch = Files.newByteChannel(journal, StandardOpenOption.READ)) {
-            ch.position(pos);
-            return Channels.newInputStream(ch).readNBytes(n);
+    /** ctime do kernel: muda a cada escrita e nao e ajustavel por usuario. null se o FS nao expoe. */
+    private FileTime ctime() throws IOException {
+        try {
+            return (FileTime) Files.getAttribute(journal, "unix:ctime");
+        } catch (UnsupportedOperationException e) {
+            return null;
         }
+    }
+
+    /** Os bytes [0, offset) ainda sao os que o indice agregou? (CRC32C, sem parse) */
+    private boolean prefixoConfere() throws IOException {
+        CRC32C atual = new CRC32C();
+        ByteBuffer buf = ByteBuffer.allocate(BLOCO);
+        try (SeekableByteChannel ch = Files.newByteChannel(journal, StandardOpenOption.READ)) {
+            for (long falta = offset; falta > 0; ) {
+                buf.clear().limit((int) Math.min(BLOCO, falta));
+                int n = ch.read(buf);
+                if (n == -1) throw new EOFException("journal encolheu durante a conferencia");
+                atual.update(buf.flip());
+                falta -= n;
+            }
+        }
+        bytesVerificados += offset;
+        return atual.getValue() == crc.getValue();
     }
 
     private void ler() throws IOException {
         long lidos = 0;
         try (SeekableByteChannel ch = Files.newByteChannel(journal, StandardOpenOption.READ)) {
             ch.position(offset);
-            InputStream in = new BufferedInputStream(Channels.newInputStream(ch), BLOCO);
+            InputStream in = new BufferedInputStream(
+                    new CheckedInputStream(Channels.newInputStream(ch), crc), BLOCO);
             ByteArrayOutputStream pendente = new ByteArrayOutputStream();
             int b;
             while ((b = in.read()) != -1) {
@@ -169,12 +224,6 @@ final class JournalIndice {
         }
         bytesLidos += lidos;
         offset += lidos;
-        atualizarCauda();
-    }
-
-    private void atualizarCauda() throws IOException {
-        int tam = (int) Math.min(CAUDA, offset);
-        cauda = lerBytes(offset - tam, tam);
     }
 
     private static String texto(byte[] bytes) {
@@ -231,9 +280,10 @@ final class JournalIndice {
     private void reset() {
         resets++;
         offset = 0;
-        cauda = new byte[0];
         fragmento = false;
         fileKey = null;
+        crc.reset();
+        ctimeVisto = null;
         lotesComAcao.clear();
         resolvidas.clear();
         porRede.clear();
