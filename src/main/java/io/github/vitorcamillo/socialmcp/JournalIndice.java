@@ -188,7 +188,7 @@ final class JournalIndice {
 
     private void agregarTexto(String linha) {
         if (linha.isBlank()) return;
-        // Escape \uXXXX pode ocultar o literal do type (ex.: "\u0061ction"); nesse caso nao filtrar.
+        // Escape unicode pode ocultar o literal do type (ex.: action com 'a' escapado); nesse caso nao filtrar.
         if (!linha.contains("\\u")
                 && !Store.podeConter(linha, TOKEN_ACTION)
                 && !Store.podeConter(linha, TOKEN_BATCH)
