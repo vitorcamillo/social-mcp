@@ -120,7 +120,13 @@ public class BrowserPool implements AutoCloseable {
         JavaDriverless d = new JavaDriverless("sdk-" + n, options, false);
         d.setPageLoadTimeout(45_000);
         d.implicitlyWait(4_000);
-        instalarGuarda(d, n);
+        instalarGuardaOuFechar(() -> instalarGuarda(d, n), () -> {
+            try {
+                d.quit();
+            } catch (Exception q) {
+                throw new IllegalStateException("falha ao fechar navegador sem guarda da rede '" + n + "'", q);
+            }
+        });
         applyWindowSize(d, n, parseWindowSize(cfg.path("windowSize").asText(null)));
         return d;
     }
@@ -128,16 +134,36 @@ public class BrowserPool implements AutoCloseable {
     /**
      * Guarda de navegacao da rede: cada documento (goto, redirect HTTP, meta/JS,
      * inclusive tardio) e validado ANTES de a requisicao sair. Se a instalacao
-     * falhar, segue so com a checagem pos-navegacao (Tools.conferirDestino) e o
-     * erro vai para stderr.
+     * falhar (erro ou timeout), a falha propaga: navegador sem interceptacao
+     * pre-requisicao nunca e usado, pois redirect HTTP ou tardio enviaria dados
+     * ao host externo antes da checagem pos-navegacao (Tools.conferirDestino).
      */
     private void instalarGuarda(JavaDriverless d, String n) {
         try {
             Target target = d.getChrome().getCurrentTarget().get(WINDOW_CDP_TIMEOUT_S, TimeUnit.SECONDS);
             navGuards.put(n, NavGuard.instalar(target, url -> BatchStore.urlNavegavel(store, n, url)));
         } catch (Exception e) {
-            System.err.println("[social-mcp] " + n + ": guarda de navegacao nao instalada"
-                    + " (vale so a checagem pos-navegacao): " + e.getMessage());
+            if (e instanceof InterruptedException) Thread.currentThread().interrupt();
+            throw new IllegalStateException("guarda de navegacao nao instalada para a rede '" + n
+                    + "'; navegador nao sera usado sem interceptacao pre-requisicao", e);
+        }
+    }
+
+    /**
+     * Exige a guarda instalada: se {@code instalar} falhar, fecha a sessao
+     * ({@code fecharSessao}) e propaga a falha original — erro ao fechar entra
+     * como suprimido, nunca mascara a causa. Sucesso nao fecha nada.
+     */
+    static void instalarGuardaOuFechar(Runnable instalar, Runnable fecharSessao) {
+        try {
+            instalar.run();
+        } catch (RuntimeException e) {
+            try {
+                fecharSessao.run();
+            } catch (RuntimeException q) {
+                e.addSuppressed(q);
+            }
+            throw e;
         }
     }
 
