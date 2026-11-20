@@ -3,6 +3,7 @@ package io.github.vitorcamillo.socialmcp;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
@@ -17,7 +18,9 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -212,20 +215,23 @@ public class Store {
 
     // ---------- journal ----------
 
-    // cache das linhas (so sob journalLock + trava "journal"): o journal so cresce por append,
-    // entao tamanho+mtime iguais = conteudo igual; social_status le uma vez em vez de uma por rede
-    private List<String> journalCache = List.of();
-    private long journalCacheTam = -1, journalCacheMtime = -1;
+    // Sem cache do journal: o historico so cresce por append, reter todas as linhas
+    // causaria crescimento indefinido e pico dobrado (cache antigo + recarga) apos append.
+    // Toda leitura percorre o arquivo por streaming, com memoria O(linha).
 
-    private List<String> linhasJournal() throws IOException {
-        long tam = Files.size(journalPath());
-        long mtime = Files.getLastModifiedTime(journalPath()).toMillis();
-        if (tam != journalCacheTam || mtime != journalCacheMtime) {
-            journalCache = List.copyOf(Files.readAllLines(journalPath(), StandardCharsets.UTF_8));
-            journalCacheTam = tam;
-            journalCacheMtime = mtime;
+    /** Manipulador de linha do journal; devolver false interrompe a leitura. */
+    @FunctionalInterface
+    private interface ManipuladorLinha {
+        boolean aceitar(String linha);
+    }
+
+    private void percorrerJournal(ManipuladorLinha manipulador) throws IOException {
+        try (BufferedReader br = Files.newBufferedReader(journalPath(), StandardCharsets.UTF_8)) {
+            String linha;
+            while ((linha = br.readLine()) != null) {
+                if (!manipulador.aceitar(linha)) break;
+            }
         }
-        return journalCache;
     }
 
     public void appendJournal(String type, String network, ObjectNode detail) {
@@ -250,10 +256,14 @@ public class Store {
     public List<String> tail(int n) {
         synchronized (journalLock) {
             try (Trava ignored = lock("journal")) {
-                List<String> all = linhasJournal();
-                List<String> out = new ArrayList<>();
-                for (int i = Math.max(0, all.size() - n); i < all.size(); i++) out.add(all.get(i));
-                return out;
+                if (n <= 0) return List.of();
+                Deque<String> ultimas = new ArrayDeque<>();
+                percorrerJournal(linha -> {
+                    ultimas.addLast(linha);
+                    if (ultimas.size() > n) ultimas.removeFirst();
+                    return true;
+                });
+                return new ArrayList<>(ultimas);
             } catch (IOException e) {
                 throw new RuntimeException("Falha ao ler journal: " + e.getMessage(), e);
             }
@@ -265,19 +275,22 @@ public class Store {
         if (batchId == null) return false;
         synchronized (journalLock) {
             try (Trava ignored = lock("journal")) {
-                for (String line : linhasJournal()) {
-                    if (line.isBlank()) continue;
-                    if (!podeConter(line, batchId)) continue;
-                    JsonNode e = Json.parse(line);
+                boolean[] achou = {false};
+                percorrerJournal(linha -> {
+                    if (linha.isBlank()) return true;
+                    if (!podeConter(linha, batchId)) return true;
+                    JsonNode e = Json.parse(linha);
                     if ("action".equals(e.path("type").asText())
-                            && batchId != null && batchId.equals(e.path("batchId").asText(null))) {
-                        return true;
+                            && batchId.equals(e.path("batchId").asText(null))) {
+                        achou[0] = true;
+                        return false;
                     }
-                }
+                    return true;
+                });
+                return achou[0];
             } catch (IOException e) {
                 throw new RuntimeException("Falha ao ler journal: " + e.getMessage(), e);
             }
-            return false;
         }
     }
 
@@ -312,53 +325,56 @@ public class Store {
         Usage u = new Usage();
         String day = today();
         Set<String> lotesHoje = new HashSet<>();
-        int legadosHoje = 0;
+        int[] legadosHoje = {0};
         synchronized (journalLock) {
             try (Trava ignored = lock("journal")) {
-                for (String line : linhasJournal()) {
-                    if (line.isBlank()) continue;
-                    if (!podeConter(line, network)) continue;
-                    JsonNode e = Json.parse(line);
-                    if (!network.equals(e.path("network").asText(null))) continue;
+                percorrerJournal(linha -> {
+                    if (linha.isBlank()) return true;
+                    if (!podeConter(linha, network)) return true;
+                    JsonNode e = Json.parse(linha);
+                    if (!network.equals(e.path("network").asText(null))) return true;
                     boolean hoje = day.equals(e.path("day").asText(""));
                     if ("action".equals(e.path("type").asText())
                             && "public".equals(e.path("cls").asText())) {
                         String batchId = e.path("batchId").asText("");
-                        if (excludeBatchId != null && excludeBatchId.equals(batchId)) continue;
-                        u.lastPublicActionMs = Math.max(u.lastPublicActionMs, e.path("ts").asLong(0));
-                        if (batchId.isBlank()) {
-                            if (hoje) legadosHoje++;
-                        } else if (hoje) {
-                            lotesHoje.add(batchId);
+                        if (excludeBatchId == null || !excludeBatchId.equals(batchId)) {
+                            u.lastPublicActionMs = Math.max(u.lastPublicActionMs, e.path("ts").asLong(0));
+                            if (batchId.isBlank()) {
+                                if (hoje) legadosHoje[0]++;
+                            } else if (hoje) {
+                                lotesHoje.add(batchId);
+                            }
                         }
                     }
                     if ("batch_executed".equals(e.path("type").asText()) && hoje) u.batches++;
-                }
+                    return true;
+                });
             } catch (IOException e) {
                 // sem historico nao ha como conferir cota/espacamento: falha fecha, nunca libera com zero
                 throw new RuntimeException("Falha ao ler journal: " + e.getMessage(), e);
             }
         }
-        u.publicActions = legadosHoje + lotesHoje.size();
+        u.publicActions = legadosHoje[0] + lotesHoje.size();
         return u;
     }
 
     public int batchesToday() {
-        int n = 0;
+        int[] n = {0};
         String day = today();
         synchronized (journalLock) {
             try (Trava ignored = lock("journal")) {
-                for (String line : linhasJournal()) {
-                    if (line.isBlank()) continue;
-                    if (!podeConter(line, "batch_executed") || !podeConter(line, day)) continue;
-                    JsonNode e = Json.parse(line);
-                    if ("batch_executed".equals(e.path("type").asText()) && day.equals(e.path("day").asText(""))) n++;
-                }
+                percorrerJournal(linha -> {
+                    if (linha.isBlank()) return true;
+                    if (!podeConter(linha, "batch_executed") || !podeConter(linha, day)) return true;
+                    JsonNode e = Json.parse(linha);
+                    if ("batch_executed".equals(e.path("type").asText()) && day.equals(e.path("day").asText(""))) n[0]++;
+                    return true;
+                });
             } catch (IOException e) {
                 throw new RuntimeException("Falha ao ler journal: " + e.getMessage(), e);
             }
         }
-        return n;
+        return n[0];
     }
 
     // ---------- incerteza de envio ----------
@@ -415,15 +431,16 @@ public class Store {
         Set<String> out = new HashSet<>();
         synchronized (journalLock) {
             try (Trava ignored = lock("journal")) {
-                for (String line : linhasJournal()) {
-                    if (line.isBlank()) continue;
-                    if (!podeConter(line, "incerteza_resolvida")) continue;
-                    JsonNode e = Json.parse(line);
+                percorrerJournal(linha -> {
+                    if (linha.isBlank()) return true;
+                    if (!podeConter(linha, "incerteza_resolvida")) return true;
+                    JsonNode e = Json.parse(linha);
                     if ("incerteza_resolvida".equals(e.path("type").asText())) {
                         String id = e.path("batchId").asText("");
                         if (!id.isBlank()) out.add(id);
                     }
-                }
+                    return true;
+                });
             } catch (IOException e) {
                 throw new RuntimeException("Falha ao ler journal: " + e.getMessage(), e);
             }

@@ -151,11 +151,37 @@ class ManutencaoTest {
     void cacheDoJournalVeAppendDeOutroProcesso() throws Exception {
         Store a = store();
         a.appendJournal("action", "instagram", Json.obj().put("cls", "public").put("batchId", "c1"));
-        assertEquals(1, a.usageFor("instagram").publicActions); // popula o cache de a
+        assertEquals(1, a.usageFor("instagram").publicActions);
         Store b = new Store(a.home); // outro processo no mesmo home
         b.appendJournal("action", "instagram", Json.obj().put("cls", "public").put("batchId", "c2"));
-        assertEquals(2, a.usageFor("instagram").publicActions, "append alheio invalida o cache");
+        assertEquals(2, a.usageFor("instagram").publicActions, "append alheio aparece na leitura seguinte");
         assertTrue(a.batchStarted("c2"));
+    }
+
+    @Test
+    void journalGrandeEhLidoSemReterHistorico() throws Exception {
+        Store s = store();
+        String dia = s.today();
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 5_000; i++) {
+            sb.append("{\"ts\":").append(i).append(",\"day\":\"").append(dia)
+                    .append("\",\"type\":\"action\",\"network\":\"instagram\",\"cls\":\"public\",\"batchId\":\"g")
+                    .append(i).append("\"}\n");
+        }
+        sb.append("{\"ts\":5000,\"day\":\"").append(dia)
+                .append("\",\"type\":\"batch_executed\",\"network\":\"instagram\"}\n");
+        Files.writeString(s.journalPath(), sb.toString(), StandardCharsets.UTF_8,
+                java.nio.file.StandardOpenOption.APPEND);
+
+        assertEquals(5_000, s.usageFor("instagram").publicActions);
+        assertEquals(1, s.batchesToday());
+        assertTrue(s.batchStarted("g4999"));
+        assertEquals(2, s.tail(2).size());
+        assertTrue(s.tail(2).get(1).contains("batch_executed"));
+        // append apos historico grande: leitura seguinte ve a linha nova sem recarga em cache
+        s.appendJournal("action", "instagram", Json.obj().put("cls", "public").put("batchId", "novo"));
+        assertTrue(s.batchStarted("novo"));
+        assertEquals(5_001, s.usageFor("instagram").publicActions);
     }
 
     @Test
