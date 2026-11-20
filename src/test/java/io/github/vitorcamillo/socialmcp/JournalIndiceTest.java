@@ -631,6 +631,42 @@ class JournalIndiceTest {
     }
 
     @Test
+    void typeComEscapeUnicodeIgualAoOraculo() throws Exception {
+        Path j = novoJournal("escape-unicode.jsonl");
+        String conteudo =
+                "{\"ts\":1,\"day\":\"" + HOJE + "\",\"type\":\"\\u0061ction\",\"network\":\"x\",\"cls\":\"public\",\"batchId\":\"b1\"}\n"
+                        + "{\"ts\":2,\"day\":\"" + HOJE + "\",\"type\":\"\\u0062atch_executed\",\"network\":\"x\"}\n"
+                        + "{\"ts\":3,\"day\":\"" + HOJE + "\",\"type\":\"incerteza_resolvid\\u0061\",\"network\":\"x\",\"batchId\":\"r1\"}\n";
+        Files.writeString(j, conteudo, StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+
+        JournalIndice idx = new JournalIndice(j);
+        assertIgualAoOraculo(idx, j, HOJE);
+        assertEquals(1, idx.uso("x", null, HOJE).publicActions);
+        assertEquals(1, idx.uso("x", null, HOJE).batches);
+        assertEquals(1, idx.lotesExecutadosNoDia(HOJE));
+        assertTrue(idx.loteIniciado("b1"));
+        assertTrue(idx.incertezasResolvidas().contains("r1"));
+    }
+
+    @Test
+    void crIsoladoIgualAoOraculo() throws Exception {
+        Path j = novoJournal("cr-isolado.jsonl");
+        String conteudo = linha("x", "b1", HOJE, 1) + "\r"
+                + linha("x", "b2", HOJE, 2) + "\r"
+                + "{\"ts\":3,\"day\":\"" + HOJE + "\",\"type\":\"batch_executed\",\"network\":\"x\"}\r"
+                + "{\"ts\":4,\"day\":\"" + HOJE + "\",\"type\":\"incerteza_resolvida\",\"network\":\"x\",\"batchId\":\"r1\"}\r";
+        Files.writeString(j, conteudo, StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+
+        JournalIndice idx = new JournalIndice(j);
+        assertIgualAoOraculo(idx, j, HOJE);
+        assertEquals(2, idx.uso("x", null, HOJE).publicActions);
+        assertEquals(1, idx.uso("x", null, HOJE).batches);
+        assertTrue(idx.loteIniciado("b1"));
+        assertTrue(idx.loteIniciado("b2"));
+        assertTrue(idx.incertezasResolvidas().contains("r1"));
+    }
+
+    @Test
     void resetLimpaTodoOEstado() throws Exception {
         Path j = novoJournal("inc-reset-limpa.jsonl");
         StringBuilder antes = new StringBuilder();

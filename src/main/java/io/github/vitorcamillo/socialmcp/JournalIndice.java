@@ -154,7 +154,7 @@ final class JournalIndice {
             int b;
             while ((b = in.read()) != -1) {
                 lidos++;
-                if (b == '\n') {
+                if (b == '\n' || b == '\r') {
                     agregarLinha(pendente.toByteArray());
                     pendente.reset();
                 } else {
@@ -188,7 +188,9 @@ final class JournalIndice {
 
     private void agregarTexto(String linha) {
         if (linha.isBlank()) return;
-        if (!Store.podeConter(linha, TOKEN_ACTION)
+        // Escape \uXXXX pode ocultar o literal do type (ex.: "\u0061ction"); nesse caso nao filtrar.
+        if (!linha.contains("\\u")
+                && !Store.podeConter(linha, TOKEN_ACTION)
                 && !Store.podeConter(linha, TOKEN_BATCH)
                 && !Store.podeConter(linha, TOKEN_INCERTEZA)) {
             return;
