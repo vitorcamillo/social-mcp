@@ -85,6 +85,19 @@ class ManutencaoTest {
     }
 
     @Test
+    void podaRespeitaFronteiraExataDaRetencao() throws Exception {
+        Store s = store();
+        long agora = System.currentTimeMillis();
+        long limite = 90L * 86_400_000L;
+        Path naFronteira = escrever(s.screenshotsDir().resolve("1-x.png"), agora - limite);
+        Path umMsAlem = escrever(s.screenshotsDir().resolve("2-x.png"), agora - limite - 1);
+
+        assertEquals(1, s.podarScreenshots(agora));
+        assertTrue(Files.exists(naFronteira), "exatamente 90 dias ainda nao venceu");
+        assertFalse(Files.exists(umMsAlem));
+    }
+
+    @Test
     void novoScreenshotPodaEDevolveCaminho() throws Exception {
         Store s = store();
         Path velho = escrever(s.screenshotsDir().resolve("1-x.png"), diasAtras(100));
@@ -190,5 +203,9 @@ class ManutencaoTest {
         assertTrue(Store.podeConter(linha, "instagram"));
         assertFalse(Store.podeConter(linha, "insta"));
         assertTrue(Store.podeConter(linha, "a\"b"));
+        assertFalse(Store.podeConter("{\"n\":\"q\"}", "a b"));   // espaco (0x20) nao e escapado pelo JSON: filtra
+        assertFalse(Store.podeConter("{\"n\":\"q\"}", "a~b"));   // til (0x7e) idem
+        assertTrue(Store.podeConter("{\"n\":\"q\"}", "a\u001fb")); // controle: nao filtra
+        assertTrue(Store.podeConter("{\"n\":\"q\"}", "a\u007fb")); // DEL/nao-ASCII: nao filtra
     }
 }

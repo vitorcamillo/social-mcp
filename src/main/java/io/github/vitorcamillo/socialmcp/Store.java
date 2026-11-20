@@ -3,7 +3,6 @@ package io.github.vitorcamillo.socialmcp;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
@@ -18,10 +17,7 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.time.LocalDate;
 import java.time.ZoneId;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Deque;
-import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -38,6 +34,7 @@ public class Store {
     /** Monitor do journal vale para TODAS as instancias da JVM: so uma thread por vez
      *  tenta a trava de arquivo (evita OverlappingFileLockException entre canais). */
     private static final Object journalLock = new Object();
+    private final JournalIndice journalIndice;
 
     public Store() {
         this(defaultHome());
@@ -45,6 +42,7 @@ public class Store {
 
     public Store(Path home) {
         this.home = home.toAbsolutePath().normalize();
+        this.journalIndice = new JournalIndice(journalPath());
         try {
             Files.createDirectories(this.home);
             Files.createDirectories(this.home.resolve("batches"));
@@ -215,24 +213,9 @@ public class Store {
 
     // ---------- journal ----------
 
-    // Sem cache do journal: o historico so cresce por append, reter todas as linhas
-    // causaria crescimento indefinido e pico dobrado (cache antigo + recarga) apos append.
-    // Toda leitura percorre o arquivo por streaming, com memoria O(linha).
-
-    /** Manipulador de linha do journal; devolver false interrompe a leitura. */
-    @FunctionalInterface
-    private interface ManipuladorLinha {
-        boolean aceitar(String linha);
-    }
-
-    private void percorrerJournal(ManipuladorLinha manipulador) throws IOException {
-        try (BufferedReader br = Files.newBufferedReader(journalPath(), StandardCharsets.UTF_8)) {
-            String linha;
-            while ((linha = br.readLine()) != null) {
-                if (!manipulador.aceitar(linha)) break;
-            }
-        }
-    }
+    // O journal so cresce por append. O JournalIndice le apenas os bytes novos desde a
+    // ultima consulta e guarda agregados proporcionais a lotes/redes/dias (nunca uma lista
+    // com todas as linhas), sem pico de recarga apos append.
 
     public void appendJournal(String type, String network, ObjectNode detail) {
         ObjectNode e = Json.obj();
@@ -256,14 +239,7 @@ public class Store {
     public List<String> tail(int n) {
         synchronized (journalLock) {
             try (Trava ignored = lock("journal")) {
-                if (n <= 0) return List.of();
-                Deque<String> ultimas = new ArrayDeque<>();
-                percorrerJournal(linha -> {
-                    ultimas.addLast(linha);
-                    if (ultimas.size() > n) ultimas.removeFirst();
-                    return true;
-                });
-                return new ArrayList<>(ultimas);
+                return JournalIndice.ultimasLinhas(journalPath(), n);
             } catch (IOException e) {
                 throw new RuntimeException("Falha ao ler journal: " + e.getMessage(), e);
             }
@@ -275,19 +251,8 @@ public class Store {
         if (batchId == null) return false;
         synchronized (journalLock) {
             try (Trava ignored = lock("journal")) {
-                boolean[] achou = {false};
-                percorrerJournal(linha -> {
-                    if (linha.isBlank()) return true;
-                    if (!podeConter(linha, batchId)) return true;
-                    JsonNode e = Json.parse(linha);
-                    if ("action".equals(e.path("type").asText())
-                            && batchId.equals(e.path("batchId").asText(null))) {
-                        achou[0] = true;
-                        return false;
-                    }
-                    return true;
-                });
-                return achou[0];
+                journalIndice.atualizar(today());
+                return journalIndice.loteIniciado(batchId);
             } catch (IOException e) {
                 throw new RuntimeException("Falha ao ler journal: " + e.getMessage(), e);
             }
@@ -322,59 +287,28 @@ public class Store {
      * para os passos do proprio lote nao se bloquearem.
      */
     public Usage usageFor(String network, String excludeBatchId) {
-        Usage u = new Usage();
         String day = today();
-        Set<String> lotesHoje = new HashSet<>();
-        int[] legadosHoje = {0};
         synchronized (journalLock) {
             try (Trava ignored = lock("journal")) {
-                percorrerJournal(linha -> {
-                    if (linha.isBlank()) return true;
-                    if (!podeConter(linha, network)) return true;
-                    JsonNode e = Json.parse(linha);
-                    if (!network.equals(e.path("network").asText(null))) return true;
-                    boolean hoje = day.equals(e.path("day").asText(""));
-                    if ("action".equals(e.path("type").asText())
-                            && "public".equals(e.path("cls").asText())) {
-                        String batchId = e.path("batchId").asText("");
-                        if (excludeBatchId == null || !excludeBatchId.equals(batchId)) {
-                            u.lastPublicActionMs = Math.max(u.lastPublicActionMs, e.path("ts").asLong(0));
-                            if (batchId.isBlank()) {
-                                if (hoje) legadosHoje[0]++;
-                            } else if (hoje) {
-                                lotesHoje.add(batchId);
-                            }
-                        }
-                    }
-                    if ("batch_executed".equals(e.path("type").asText()) && hoje) u.batches++;
-                    return true;
-                });
+                journalIndice.atualizar(day);
+                return journalIndice.uso(network, excludeBatchId, day);
             } catch (IOException e) {
                 // sem historico nao ha como conferir cota/espacamento: falha fecha, nunca libera com zero
                 throw new RuntimeException("Falha ao ler journal: " + e.getMessage(), e);
             }
         }
-        u.publicActions = legadosHoje[0] + lotesHoje.size();
-        return u;
     }
 
     public int batchesToday() {
-        int[] n = {0};
         String day = today();
         synchronized (journalLock) {
             try (Trava ignored = lock("journal")) {
-                percorrerJournal(linha -> {
-                    if (linha.isBlank()) return true;
-                    if (!podeConter(linha, "batch_executed") || !podeConter(linha, day)) return true;
-                    JsonNode e = Json.parse(linha);
-                    if ("batch_executed".equals(e.path("type").asText()) && day.equals(e.path("day").asText(""))) n[0]++;
-                    return true;
-                });
+                journalIndice.atualizar(day);
+                return journalIndice.lotesExecutadosNoDia(day);
             } catch (IOException e) {
                 throw new RuntimeException("Falha ao ler journal: " + e.getMessage(), e);
             }
         }
-        return n[0];
     }
 
     // ---------- incerteza de envio ----------
@@ -428,23 +362,14 @@ public class Store {
 
     /** batchIds com evento incerteza_resolvida no journal (linha a linha, como batchStarted). */
     private Set<String> resolvidosIncerteza() {
-        Set<String> out = new HashSet<>();
+        String day = today();
         synchronized (journalLock) {
             try (Trava ignored = lock("journal")) {
-                percorrerJournal(linha -> {
-                    if (linha.isBlank()) return true;
-                    if (!podeConter(linha, "incerteza_resolvida")) return true;
-                    JsonNode e = Json.parse(linha);
-                    if ("incerteza_resolvida".equals(e.path("type").asText())) {
-                        String id = e.path("batchId").asText("");
-                        if (!id.isBlank()) out.add(id);
-                    }
-                    return true;
-                });
+                journalIndice.atualizar(day);
+                return journalIndice.incertezasResolvidas();
             } catch (IOException e) {
                 throw new RuntimeException("Falha ao ler journal: " + e.getMessage(), e);
             }
-            return out;
         }
     }
 
