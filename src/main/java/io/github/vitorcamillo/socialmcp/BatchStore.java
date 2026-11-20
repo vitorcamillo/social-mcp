@@ -168,6 +168,12 @@ public class BatchStore {
                 String url = a.path("url").asText("");
                 if (url.isBlank()) throw new IllegalArgumentException("acao " + idx + ": goto exige url");
                 if (url.contains("[[")) validateGotoMarcador(url, idx);
+                String urlSemMarcador = MARCADOR_GOTO_QUALQUER.matcher(url).replaceAll("X");
+                try {
+                    validarNavegacao(store, a.path("network").asText(""), urlSemMarcador);
+                } catch (IllegalArgumentException e) {
+                    throw new IllegalArgumentException("acao " + idx + ": " + e.getMessage());
+                }
             }
             case "wait" -> validateWait(a, idx);
             case "click" -> {
@@ -421,6 +427,53 @@ public class BatchStore {
                     && Set.of("com", "co", "org", "net", "ac", "gov", "edu", "or", "me").contains(p[p.length - 2]));
         if (sufixoPublico) return p[p.length - 3] + "." + ult2;
         return ult2;
+    }
+
+    /**
+     * browse/goto/find_duplicates: so https (porta padrao, sem user-info) para host da rede
+     * (startUrl/requestHosts) ou listado em browseHosts (da rede ou de defaults). Sem isto o
+     * agente le file://, data: ou qualquer host (exfiltracao por prompt injection).
+     */
+    static void validarNavegacao(Store store, String network, String url) {
+        if (!urlNavegavel(store, network, url)) {
+            throw new IllegalArgumentException("navegacao bloqueada: so https para host da rede " + network
+                    + " (startUrl/requestHosts/browseHosts): " + resumoUrl(url));
+        }
+    }
+
+    /** true se url e https, porta padrao, sem user-info e com host permitido para a rede. */
+    static boolean urlNavegavel(Store store, String network, String url) {
+        java.net.URI uri;
+        try {
+            uri = new java.net.URI(url);
+        } catch (java.net.URISyntaxException | NullPointerException e) {
+            return false;
+        }
+        String host = uri.getHost();
+        if (!"https".equalsIgnoreCase(uri.getScheme()) || host == null || uri.getRawUserInfo() != null
+                || (uri.getPort() != -1 && uri.getPort() != 443)) return false;
+        if (hostDaRede(store, network, host)) return true;
+        for (JsonNode lista : List.of(store.config().path("networks").path(network).path("browseHosts"),
+                store.config().path("defaults").path("browseHosts"))) {
+            for (JsonNode p : lista) if (hostCasa(host, p.asText(""))) return true;
+        }
+        return false;
+    }
+
+    /** So esquema + host (sem path/query), ate 120 chars; url nao parseavel vira "(url invalida)". */
+    static String resumoUrl(String url) {
+        if (url == null) return "(url invalida)";
+        java.net.URI uri;
+        try {
+            uri = new java.net.URI(url);
+        } catch (java.net.URISyntaxException | NullPointerException e) {
+            return "(url invalida)";
+        }
+        String scheme = uri.getScheme();
+        if (scheme == null) return "(url invalida)";
+        String host = uri.getHost();
+        String s = host == null ? scheme + ":" : scheme + "://" + host;
+        return s.length() > 120 ? s.substring(0, 120) : s;
     }
 
     /** Host igual/subdominio do dominio registravel do startUrl da rede, ou listado em requestHosts. */

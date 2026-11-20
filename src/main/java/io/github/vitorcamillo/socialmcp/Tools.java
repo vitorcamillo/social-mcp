@@ -172,10 +172,12 @@ public class Tools {
         String url = args.path("url").asText("");
         if (url.isBlank()) throw new IllegalArgumentException("url obrigatoria");
         requireNetwork(network);
+        BatchStore.validarNavegacao(store, network, url);
         exigirGuarda(network, "goto");
         JavaDriverless d = pool.get(network);
         d.get(url);
         d.sleep(1.5);
+        conferirDestino(d, network);
         int maxChars = args.has("maxChars") && args.get("maxChars").isInt()
                 ? args.get("maxChars").asInt()
                 : store.networkCfg(network).path("pageTextMaxChars").asInt(12_000);
@@ -691,9 +693,11 @@ public class Tools {
                 break;
             }
             try {
+                BatchStore.validarNavegacao(store, network, url);
                 JavaDriverless d = pool.get(network);
                 d.get(url);
                 d.sleep(2.0 + Math.random() * 2.0);
+                conferirDestino(d, network);
                 int maxChars = store.networkCfg(network).path("pageTextMaxChars").asInt(12_000);
                 String texto = BrowserPool.visibleText(d, maxChars);
                 if (aplicarTripwire(network, textoParaGuarda(BrowserPool.alertText(d), texto),
@@ -1269,8 +1273,10 @@ public class Tools {
         switch (kind) {
             case "goto" -> {
                 String url = resolverIdNovo(a.path("url").asText(), idsNovosLote);
+                BatchStore.validarNavegacao(store, network, url);
                 d.get(url);
                 d.sleep(1.2);
+                conferirDestino(d, network);
                 return "navegou para " + safe(() -> d.getCurrentUrl());
             }
             case "click" -> {
@@ -2082,6 +2088,15 @@ public class Tools {
     }
 
     // ---------- helpers ----------
+
+    /** Depois de navegar: se redirect levou para fora da rede, sai para about:blank e falha sem ler a pagina. */
+    private void conferirDestino(JavaDriverless d, String network) {
+        String atual = safe(() -> d.getCurrentUrl());
+        if (BatchStore.urlNavegavel(store, network, atual)) return;
+        try { d.get("about:blank"); } catch (Exception ignored) { }
+        throw new IllegalStateException("navegacao bloqueada apos redirect: destino fora da rede " + network
+                + ": " + BatchStore.resumoUrl(atual));
+    }
 
     private void requireNetwork(String network) {
         if (!store.knownNetworks().contains(network)) {
