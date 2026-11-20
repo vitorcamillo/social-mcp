@@ -2089,8 +2089,19 @@ public class Tools {
 
     // ---------- helpers ----------
 
-    /** Depois de navegar: se redirect levou para fora da rede, sai para about:blank e falha sem ler a pagina. */
+    /**
+     * Depois de navegar: primeiro reporta o que a guarda (NavGuard, no BrowserPool)
+     * ja barrou ANTES de a requisicao sair — redirect HTTP, meta/JS, inclusive o
+     * tardio; depois mantem a checagem pos-navegacao como rede de seguranca. Nos
+     * dois casos sai para about:blank e falha sem ler a pagina.
+     */
     private void conferirDestino(JavaDriverless d, String network) {
+        String bloqueada = pool.navegacaoBloqueada(network);
+        if (bloqueada != null) {
+            try { d.get("about:blank"); } catch (Exception ignored) { }
+            throw new IllegalStateException("navegacao bloqueada antes da requisicao: redirect para fora da rede "
+                    + network + ": " + BatchStore.resumoUrl(bloqueada));
+        }
         String atual = safe(() -> d.getCurrentUrl());
         if (BatchStore.urlNavegavel(store, network, atual)) return;
         try { d.get("about:blank"); } catch (Exception ignored) { }

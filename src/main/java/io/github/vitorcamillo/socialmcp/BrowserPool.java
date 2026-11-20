@@ -6,6 +6,7 @@ import io.github.selenium.javaDriverless.profiles.ProfileChromeOptionsFactory;
 import io.github.selenium.javaDriverless.profiles.SdkProfile;
 import io.github.selenium.javaDriverless.profiles.SdkProfilePresets;
 import io.github.selenium.javaDriverless.types.ChromeOptions;
+import io.github.selenium.javaDriverless.types.Target;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -48,6 +49,8 @@ public class BrowserPool implements AutoCloseable {
 
     private final Store store;
     private final Map<String, JavaDriverless> drivers = new ConcurrentHashMap<>();
+    /** Guarda de navegacao (interceptacao pre-requisicao) de cada Chrome aberto. */
+    private final Map<String, NavGuard> navGuards = new ConcurrentHashMap<>();
     /** Ultimo uso de cada Chrome aberto (para fechar o ocioso sem derrubar o ativo). */
     private final Map<String, Long> lastUse = new ConcurrentHashMap<>();
     private final LongSupplier clock;
@@ -117,8 +120,31 @@ public class BrowserPool implements AutoCloseable {
         JavaDriverless d = new JavaDriverless("sdk-" + n, options, false);
         d.setPageLoadTimeout(45_000);
         d.implicitlyWait(4_000);
+        instalarGuarda(d, n);
         applyWindowSize(d, n, parseWindowSize(cfg.path("windowSize").asText(null)));
         return d;
+    }
+
+    /**
+     * Guarda de navegacao da rede: cada documento (goto, redirect HTTP, meta/JS,
+     * inclusive tardio) e validado ANTES de a requisicao sair. Se a instalacao
+     * falhar, segue so com a checagem pos-navegacao (Tools.conferirDestino) e o
+     * erro vai para stderr.
+     */
+    private void instalarGuarda(JavaDriverless d, String n) {
+        try {
+            Target target = d.getChrome().getCurrentTarget().get(WINDOW_CDP_TIMEOUT_S, TimeUnit.SECONDS);
+            navGuards.put(n, NavGuard.instalar(target, url -> BatchStore.urlNavegavel(store, n, url)));
+        } catch (Exception e) {
+            System.err.println("[social-mcp] " + n + ": guarda de navegacao nao instalada"
+                    + " (vale so a checagem pos-navegacao): " + e.getMessage());
+        }
+    }
+
+    /** Ultima navegacao barrada pela guarda (consome o registro); null se nenhuma. */
+    public String navegacaoBloqueada(String network) {
+        NavGuard guard = navGuards.get(network);
+        return guard == null ? null : guard.drenarBloqueada();
     }
 
     /**
@@ -289,6 +315,7 @@ public class BrowserPool implements AutoCloseable {
     /** Fecha o Chrome da rede, se aberto; erro no quit nao falha a chamada. */
     public void close(String network) {
         JavaDriverless d = drivers.remove(network);
+        desarmarGuarda(network);
         lastUse.remove(network);
         if (d != null) {
             try {
@@ -336,7 +363,18 @@ public class BrowserPool implements AutoCloseable {
             }
         });
         drivers.clear();
+        for (String n : new ArrayList<>(navGuards.keySet())) desarmarGuarda(n);
         lastUse.clear();
+    }
+
+    private void desarmarGuarda(String network) {
+        NavGuard guard = navGuards.remove(network);
+        if (guard != null) {
+            try {
+                guard.close();
+            } catch (Exception ignored) {
+            }
+        }
     }
 
     @Override
