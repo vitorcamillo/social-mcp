@@ -269,7 +269,16 @@ public class BrowserPool implements AutoCloseable {
     public static ChromeOptions buildOptions(String network, ObjectNode cfg, String storageDir) {
         ChromeOptions options = ProfileChromeOptionsFactory.fromProfile(buildProfile(network, cfg, storageDir));
         applyProxy(options, cfg);
+        // perfis acumulavam ~7 GB de cache HTTP sem teto
+        options.addArgument("--disk-cache-size=" + diskCacheBytes(cfg));
         return options;
+    }
+
+    /** Teto do cache HTTP do Chrome em bytes (diskCacheMb, padrao 256; <=0 usa 256). */
+    static long diskCacheBytes(ObjectNode cfg) {
+        long mb = cfg.path("diskCacheMb").asLong(256);
+        if (mb <= 0) mb = 256;
+        return mb * 1024 * 1024;
     }
 
     /**

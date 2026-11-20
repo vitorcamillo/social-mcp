@@ -67,7 +67,7 @@ public final class SessionImporter {
                     break;
                 }
             }
-            String shot = store.screenshotsDir().resolve(System.currentTimeMillis() + "-import-" + network + ".png").toString();
+            String shot = store.novoScreenshot("import-" + network).toString();
             try {
                 d.screenshot(shot);
             } catch (Exception ignored) {

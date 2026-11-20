@@ -10,6 +10,7 @@ import java.nio.channels.OverlappingFileLockException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
@@ -172,7 +173,60 @@ public class Store {
         appendJournal("kill_switch", null, Json.obj().put("ativo", stopped));
     }
 
+    // ---------- screenshots ----------
+
+    static final int SCREENSHOT_RETENCAO_DIAS_PADRAO = 90;
+
+    /** Caminho para um PNG novo em screenshots/ (nome = epochMs-sufixo.png), apagando antes os vencidos. */
+    public Path novoScreenshot(String sufixo) {
+        podarScreenshots(System.currentTimeMillis());
+        return screenshotsDir().resolve(System.currentTimeMillis() + "-" + sufixo + ".png");
+    }
+
+    /** Apaga PNGs de screenshots/ com mtime mais velho que defaults.screenshotRetentionDays (padrao 90; <=0 desliga). Devolve quantos apagou. Falha de IO num arquivo: ignora e segue (nunca derruba o screenshot). */
+    int podarScreenshots(long agoraMs) {
+        int dias = config().path("defaults").path("screenshotRetentionDays").asInt(SCREENSHOT_RETENCAO_DIAS_PADRAO);
+        if (dias <= 0) return 0;
+        long limiteMs = dias * 86_400_000L;
+        int apagados = 0;
+        Path dir = screenshotsDir();
+        if (!Files.isDirectory(dir)) return 0;
+        try (var arquivos = Files.list(dir)) {
+            for (Path p : arquivos.toList()) {
+                if (!p.getFileName().toString().matches("\\d+-[A-Za-z0-9_.-]+\\.png")) continue;
+                if (!Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS)) continue;
+                try {
+                    if (agoraMs - Files.getLastModifiedTime(p, LinkOption.NOFOLLOW_LINKS).toMillis() > limiteMs) {
+                        Files.delete(p);
+                        apagados++;
+                    }
+                } catch (IOException ignored) {
+                    // falha de IO num arquivo: ignora e segue
+                }
+            }
+        } catch (IOException ignored) {
+            // falha ao listar screenshots/: nao derruba o screenshot
+        }
+        return apagados;
+    }
+
     // ---------- journal ----------
+
+    // cache das linhas (so sob journalLock + trava "journal"): o journal so cresce por append,
+    // entao tamanho+mtime iguais = conteudo igual; social_status le uma vez em vez de uma por rede
+    private List<String> journalCache = List.of();
+    private long journalCacheTam = -1, journalCacheMtime = -1;
+
+    private List<String> linhasJournal() throws IOException {
+        long tam = Files.size(journalPath());
+        long mtime = Files.getLastModifiedTime(journalPath()).toMillis();
+        if (tam != journalCacheTam || mtime != journalCacheMtime) {
+            journalCache = List.copyOf(Files.readAllLines(journalPath(), StandardCharsets.UTF_8));
+            journalCacheTam = tam;
+            journalCacheMtime = mtime;
+        }
+        return journalCache;
+    }
 
     public void appendJournal(String type, String network, ObjectNode detail) {
         ObjectNode e = Json.obj();
@@ -196,7 +250,7 @@ public class Store {
     public List<String> tail(int n) {
         synchronized (journalLock) {
             try (Trava ignored = lock("journal")) {
-                List<String> all = Files.readAllLines(journalPath(), StandardCharsets.UTF_8);
+                List<String> all = linhasJournal();
                 List<String> out = new ArrayList<>();
                 for (int i = Math.max(0, all.size() - n); i < all.size(); i++) out.add(all.get(i));
                 return out;
@@ -208,10 +262,12 @@ public class Store {
 
     /** True se o journal tem qualquer entrada type=action com esse batchId (lote comecou a rodar). */
     public boolean batchStarted(String batchId) {
+        if (batchId == null) return false;
         synchronized (journalLock) {
             try (Trava ignored = lock("journal")) {
-                for (String line : Files.readAllLines(journalPath(), StandardCharsets.UTF_8)) {
+                for (String line : linhasJournal()) {
                     if (line.isBlank()) continue;
+                    if (!podeConter(line, batchId)) continue;
                     JsonNode e = Json.parse(line);
                     if ("action".equals(e.path("type").asText())
                             && batchId != null && batchId.equals(e.path("batchId").asText(null))) {
@@ -223,6 +279,15 @@ public class Store {
             }
             return false;
         }
+    }
+
+    /** true se a linha PODE conter o valor como string JSON; token com caractere que o JSON escaparia (aspas, barra invertida, controle, nao-ASCII) nao filtra. */
+    static boolean podeConter(String linha, String token) {
+        for (int i = 0; i < token.length(); i++) {
+            char c = token.charAt(i);
+            if (c == '"' || c == '\\' || c < 0x20 || c > 0x7e) return true;
+        }
+        return linha.contains("\"" + token + "\"");
     }
 
     // ---------- consumo de cotas (derivado do journal) ----------
@@ -250,8 +315,9 @@ public class Store {
         int legadosHoje = 0;
         synchronized (journalLock) {
             try (Trava ignored = lock("journal")) {
-                for (String line : Files.readAllLines(journalPath(), StandardCharsets.UTF_8)) {
+                for (String line : linhasJournal()) {
                     if (line.isBlank()) continue;
+                    if (!podeConter(line, network)) continue;
                     JsonNode e = Json.parse(line);
                     if (!network.equals(e.path("network").asText(null))) continue;
                     boolean hoje = day.equals(e.path("day").asText(""));
@@ -282,8 +348,9 @@ public class Store {
         String day = today();
         synchronized (journalLock) {
             try (Trava ignored = lock("journal")) {
-                for (String line : Files.readAllLines(journalPath(), StandardCharsets.UTF_8)) {
+                for (String line : linhasJournal()) {
                     if (line.isBlank()) continue;
+                    if (!podeConter(line, "batch_executed") || !podeConter(line, day)) continue;
                     JsonNode e = Json.parse(line);
                     if ("batch_executed".equals(e.path("type").asText()) && day.equals(e.path("day").asText(""))) n++;
                 }
@@ -348,8 +415,9 @@ public class Store {
         Set<String> out = new HashSet<>();
         synchronized (journalLock) {
             try (Trava ignored = lock("journal")) {
-                for (String line : Files.readAllLines(journalPath(), StandardCharsets.UTF_8)) {
+                for (String line : linhasJournal()) {
                     if (line.isBlank()) continue;
+                    if (!podeConter(line, "incerteza_resolvida")) continue;
                     JsonNode e = Json.parse(line);
                     if ("incerteza_resolvida".equals(e.path("type").asText())) {
                         String id = e.path("batchId").asText("");

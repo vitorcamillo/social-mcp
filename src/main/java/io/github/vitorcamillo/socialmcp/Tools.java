@@ -328,7 +328,7 @@ public class Tools {
 
     /** PNG da tela atual em SOCIAL_MCP_HOME/screenshots/; devolve o caminho. */
     private String saveScreenshot(String network) {
-        String f = store.screenshotsDir().resolve(System.currentTimeMillis() + "-" + network + ".png").toString();
+        String f = store.novoScreenshot(network).toString();
         pool.get(network).screenshot(f);
         return f;
     }
