@@ -178,8 +178,8 @@ final class JournalIndice {
     }
 
     private static String texto(byte[] bytes) {
-        String s = new String(bytes, StandardCharsets.UTF_8);
-        return s.endsWith("\r") ? s.substring(0, s.length() - 1) : s;
+        // CR e LF ja separam linhas em ler(): o trecho nunca contem '\r'
+        return new String(bytes, StandardCharsets.UTF_8);
     }
 
     private void agregarLinha(byte[] bytes) {
