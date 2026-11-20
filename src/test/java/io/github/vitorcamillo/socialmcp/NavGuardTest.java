@@ -32,6 +32,8 @@ class NavGuardTest {
         }
     };
 
+    private static final String PRINCIPAL = "FRAME-PRINCIPAL";
+
     private static final class FakeCdp implements NavGuard.Cdp {
         record Cmd(String comando, Map<String, Object> params) {}
 
@@ -59,10 +61,14 @@ class NavGuardTest {
 
         /** Dispara um Fetch.requestPaused como o Chrome faria (redirect, subrecurso etc.). */
         void pausar(String requestId, String resourceType, String url) {
+            pausarNoFrame(requestId, resourceType, url, PRINCIPAL);
+        }
+
+        void pausarNoFrame(String requestId, String resourceType, String url, String frameId) {
             Consumer<JsonNode> l = listeners.get(NavGuard.EVENTO);
             assertNotNull(l, "listener de Fetch.requestPaused deve estar registrado");
             l.accept(Json.parse("{\"requestId\":\"" + requestId + "\",\"resourceType\":\"" + resourceType
-                    + "\",\"request\":{\"url\":\"" + url + "\"}}"));
+                    + "\",\"frameId\":\"" + frameId + "\",\"request\":{\"url\":\"" + url + "\"}}"));
         }
 
         boolean falhou(String requestId) {
@@ -80,11 +86,12 @@ class NavGuardTest {
     @Test
     void habilitaFetchNoEstagioDeRequisicao() {
         FakeCdp cdp = new FakeCdp();
-        NavGuard guard = NavGuard.instalar(cdp, REDE);
+        NavGuard guard = NavGuard.instalar(cdp, PRINCIPAL, REDE);
         guard.close();
         FakeCdp.Cmd enable = cdp.comandos.stream().filter(c -> "Fetch.enable".equals(c.comando())).findFirst().orElseThrow();
         assertTrue(enable.params().get("patterns").toString().contains("Request"), enable.params().toString());
         assertTrue(enable.params().get("patterns").toString().contains("*"), enable.params().toString());
+        assertTrue(enable.params().get("patterns").toString().contains("Document"), "so pausa documento");
         assertTrue(cdp.comandos.stream().anyMatch(c -> "Fetch.disable".equals(c.comando())));
         assertTrue(cdp.listeners.isEmpty(), "close remove o listener");
     }
@@ -92,7 +99,7 @@ class NavGuardTest {
     @Test
     void redirectParaForaDaRedeFalhaAntesDaRequisicao() {
         FakeCdp cdp = new FakeCdp();
-        NavGuard guard = NavGuard.instalar(cdp, REDE);
+        NavGuard guard = NavGuard.instalar(cdp, PRINCIPAL, REDE);
         // redirect HTTP do host permitido para fora, com dado sensivel na query
         cdp.pausar("r1", "Document", "https://evil.example/?segredo=dados");
         assertTrue(cdp.falhou("r1"), "failRequest(BlockedByClient) para documento fora da rede");
@@ -106,7 +113,7 @@ class NavGuardTest {
     @Test
     void downgradeParaHttpTambemEBarredado() {
         FakeCdp cdp = new FakeCdp();
-        NavGuard guard = NavGuard.instalar(cdp, REDE);
+        NavGuard guard = NavGuard.instalar(cdp, PRINCIPAL, REDE);
         cdp.pausar("r2", "Document", "http://rede.example/x");
         assertTrue(cdp.falhou("r2"), "so https: downgrade http e barrado antes de sair");
         assertEquals("http://rede.example/x", guard.drenarBloqueada());
@@ -116,7 +123,7 @@ class NavGuardTest {
     @Test
     void documentoDentroDaRedeSegue() {
         FakeCdp cdp = new FakeCdp();
-        NavGuard guard = NavGuard.instalar(cdp, REDE);
+        NavGuard guard = NavGuard.instalar(cdp, PRINCIPAL, REDE);
         cdp.pausar("r3", "Document", "https://rede.example/pagina");
         assertTrue(cdp.continuou("r3"));
         assertFalse(cdp.falhou("r3"));
@@ -127,7 +134,7 @@ class NavGuardTest {
     @Test
     void subrecursoESquemaLocalSeguemSemValidar() {
         FakeCdp cdp = new FakeCdp();
-        NavGuard guard = NavGuard.instalar(cdp, REDE);
+        NavGuard guard = NavGuard.instalar(cdp, PRINCIPAL, REDE);
         cdp.pausar("r4", "XHR", "https://evil.example/api?x=1");
         cdp.pausar("r5", "Image", "http://evil.example/img.png");
         cdp.pausar("r6", "Document", "about:blank");
@@ -141,7 +148,7 @@ class NavGuardTest {
     @Test
     void redirectTardioContinuaBarradoAposAConferencia() {
         FakeCdp cdp = new FakeCdp();
-        NavGuard guard = NavGuard.instalar(cdp, REDE);
+        NavGuard guard = NavGuard.instalar(cdp, PRINCIPAL, REDE);
         cdp.pausar("r7", "Document", "https://rede.example/inicio");
         assertTrue(cdp.continuou("r7"));
         assertNull(guard.drenarBloqueada(), "conferencia do destino logo apos navegar: nada bloqueado");
@@ -153,10 +160,24 @@ class NavGuardTest {
     }
 
     @Test
+    void iframeDeTerceiroSegueMasFramePrincipalNao() {
+        FakeCdp cdp = new FakeCdp();
+        NavGuard guard = NavGuard.instalar(cdp, PRINCIPAL, REDE);
+        // youtube/reddit/pinterest embutem accounts.google.com, google.com e recaptcha.net
+        cdp.pausarNoFrame("i1", "Document", "https://accounts.google.com/RotateCookiesPage", "IFRAME-1");
+        assertTrue(cdp.continuou("i1"), "iframe de terceiro nao derruba a pagina");
+        assertNull(guard.drenarBloqueada());
+        cdp.pausarNoFrame("i2", "Document", "https://evil.example/?x=1", "");
+        assertTrue(cdp.falhou("i2"), "sem frameId = trata como principal");
+        assertEquals("https://evil.example/?x=1", guard.drenarBloqueada());
+        guard.close();
+    }
+
+    @Test
     void instalacaoSemFetchNaoDeixaListenerAtivo() {
         FakeCdp cdp = new FakeCdp();
         cdp.falharNoEnable = true;
-        assertThrows(IllegalStateException.class, () -> NavGuard.instalar(cdp, REDE));
+        assertThrows(IllegalStateException.class, () -> NavGuard.instalar(cdp, PRINCIPAL, REDE));
         assertTrue(cdp.listeners.isEmpty(), "falha no install remove o listener");
     }
 }

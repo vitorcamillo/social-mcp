@@ -16,8 +16,9 @@ import java.util.function.Predicate;
  * Guarda de navegacao no nivel de requisicao: TODO documento (goto, redirect HTTP,
  * meta refresh, location do JS, inclusive o tardio) e validado no Fetch.requestPaused
  * ANTES de a requisicao sair do Chrome. Documento fora da rede = Fetch.failRequest
- * (BlockedByClient): nem query string chega ao destino. Sub-recursos (XHR, imagem...)
- * e esquemas nao-HTTP (about:, data:) seguem direto. A checagem pos-navegacao do
+ * (BlockedByClient): nem query string chega ao destino. So o frame principal e
+ * decidido: iframe de terceiro (login Google, reCAPTCHA) segue, senao youtube/reddit/
+ * pinterest quebram. Fetch pausa so Document; esquemas nao-HTTP (about:, data:) seguem. A checagem pos-navegacao do
  * Tools.conferirDestino continua valendo como rede de seguranca.
  */
 public final class NavGuard implements AutoCloseable {
@@ -45,20 +46,22 @@ public final class NavGuard implements AutoCloseable {
     }
 
     private final Cdp cdp;
+    private final String framePrincipal;
     private final Predicate<String> navegavel;
     private final Consumer<JsonNode> listener = this::aoPausar;
     private String bloqueada;
 
     public static NavGuard instalar(Target target, Predicate<String> urlNavegavel) {
-        return instalar(new TargetCdp(target), urlNavegavel);
+        // alvo do tipo page: id do frame principal == id do target
+        return instalar(new TargetCdp(target), target.getId(), urlNavegavel);
     }
 
-    static NavGuard instalar(Cdp cdp, Predicate<String> urlNavegavel) {
-        NavGuard guard = new NavGuard(cdp, urlNavegavel);
+    static NavGuard instalar(Cdp cdp, String framePrincipal, Predicate<String> urlNavegavel) {
+        NavGuard guard = new NavGuard(cdp, framePrincipal, urlNavegavel);
         try {
             await(cdp.addCdpListener(EVENTO, guard.listener));
             await(cdp.executeCdpCmd("Fetch.enable",
-                    Map.of("patterns", List.of(Map.of("urlPattern", "*", "requestStage", "Request"))), CMD_TIMEOUT_S));
+                    Map.of("patterns", List.of(Map.of("urlPattern", "*", "resourceType", "Document", "requestStage", "Request"))), CMD_TIMEOUT_S));
             return guard;
         } catch (Exception e) {
             try { guard.close(); } catch (RuntimeException limpeza) { e.addSuppressed(limpeza); }
@@ -66,8 +69,9 @@ public final class NavGuard implements AutoCloseable {
         }
     }
 
-    private NavGuard(Cdp cdp, Predicate<String> navegavel) {
+    private NavGuard(Cdp cdp, String framePrincipal, Predicate<String> navegavel) {
         this.cdp = cdp;
+        this.framePrincipal = framePrincipal;
         this.navegavel = navegavel;
     }
 
@@ -88,7 +92,10 @@ public final class NavGuard implements AutoCloseable {
         if (requestId.isEmpty()) return; // sem id nao ha como responder; segue o timeout do Chrome
         String url = params.path("request").path("url").asText("");
         boolean documento = "Document".equals(params.path("resourceType").asText(""));
-        if (documento && redeHttp(url) && !navegavel.test(url)) {
+        String frame = params.path("frameId").asText("");
+        // sem frameId ou frame desconhecido = trata como principal (fail-closed)
+        boolean principal = frame.isEmpty() || framePrincipal == null || frame.equals(framePrincipal);
+        if (documento && principal && redeHttp(url) && !navegavel.test(url)) {
             synchronized (this) { bloqueada = url; }
             responder("Fetch.failRequest", Map.of("requestId", requestId, "errorReason", "BlockedByClient"));
             return;
