@@ -1,6 +1,7 @@
 package io.github.vitorcamillo.socialmcp;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
@@ -25,6 +26,11 @@ class TextGateMutantesTest {
         if (config != null) gate.put("config", config);
         Files.writeString(s.configPath(), Json.writePretty(cfg), StandardCharsets.UTF_8);
         return s;
+    }
+
+    /** Sistema com setsid e kill: o gate roda em grupo proprio (senao, fallback por descendentes). */
+    static boolean comGrupo() {
+        return Files.isExecutable(Path.of(TextGate.SETSID)) && Files.isExecutable(Path.of(TextGate.KILL));
     }
 
     private Path lote(Store s) throws Exception {
@@ -103,11 +109,89 @@ class TextGateMutantesTest {
         ObjectNode gate = (ObjectNode) cfg.get("defaults").get("gate");
         gate.putArray("command").add("/definitivamente/nao/existe/gate-xyz-123");
         Files.writeString(s.configPath(), Json.writePretty(cfg), StandardCharsets.UTF_8);
+        // com setsid na frente, o exec que falha e dele (127); sem setsid, IOException do start
         TextGate.Resultado r = TextGate.rodarPre(s, lote(s), List.of());
-        assertNotNull(r);
+        assertEquals(comGrupo() ? 127 : 1, r.exit());
+        assertEquals("ERRO", r.resultado());
+        assertTrue(r.saida().contains("gate-xyz-123"), r.saida());
+        String antes = TextGate.KILL;
+        TextGate.KILL = "/definitivamente/sem/kill";
+        try {
+            r = TextGate.rodarPre(s, lote(s), List.of());
+        } finally {
+            TextGate.KILL = antes;
+        }
         assertEquals(1, r.exit());
         assertEquals("ERRO", r.resultado());
         assertTrue(r.saida().contains("gate-xyz-123"), r.saida());
+    }
+
+    @Test
+    void timeoutMataNetoQueSaiuDaArvore() throws Exception {
+        // fork duplo: o neto vira filho do init e some de descendants() (o mesmo que acontece com
+        // um filho nascido entre o snapshot e o kill do pai); o SIGKILL no grupo ainda o pega
+        assumeTrue(comGrupo(), "sem setsid/kill nao ha grupo proprio");
+        String marca = "gate-fork-" + System.nanoTime();
+        Store s = storeComGate(tmp, ": " + marca + "; ( (sleep 30; :) & ); sleep 30", 1, null);
+        assertEquals("ERRO", TextGate.rodarPre(s, lote(s), List.of()).resultado());
+        Thread.sleep(300);
+        List<ProcessHandle> vivos = ProcessHandle.allProcesses().filter(h -> h.isAlive()
+                && h.info().commandLine().map(c -> c.contains(marca)).orElse(false)).toList();
+        vivos.forEach(ProcessHandle::destroyForcibly);
+        assertEquals(List.of(), vivos, "filho do gate sobreviveu ao timeout");
+    }
+
+    @Test
+    void interrupcaoDuranteOKillPreservaFlag() throws Exception {
+        assumeTrue(Files.isExecutable(Path.of(TextGate.SETSID)), "sem setsid nao ha kill de grupo");
+        Path killLento = tmp.resolve("kill-lento");
+        Files.writeString(killLento, "#!/bin/sh\nsleep 4\n");
+        killLento.toFile().setExecutable(true);
+        Store s = storeComGate(tmp, "sleep 30", 1, null);
+        Path l = lote(s);
+        Object[] fim = new Object[2];
+        String antes = TextGate.KILL;
+        TextGate.KILL = killLento.toString();
+        try {
+            Thread t = new Thread(() -> {
+                fim[0] = TextGate.rodarPre(s, l, List.of()).saida();
+                fim[1] = Thread.currentThread().isInterrupted();
+            });
+            t.start();
+            Thread.sleep(2_000); // gate ja estourou (1 s); thread esperando o kill lento (ate 5 s)
+            t.interrupt();
+            t.join(1_500);
+            assertFalse(t.isAlive(), "a espera do kill deveria ter sido interrompida");
+        } finally {
+            TextGate.KILL = antes;
+        }
+        assertEquals("gate excedeu 1s", fim[0]);
+        assertEquals(true, fim[1]);
+    }
+
+    @Test
+    void gateQueTerminaNaoDeixaFilhoVivo() throws Exception {
+        assumeTrue(comGrupo(), "sem setsid/kill nao ha grupo proprio");
+        Path pidFile = tmp.resolve("sobra.pid");
+        Store s = storeComGate(tmp,
+                "sleep 30 >/dev/null 2>&1 & echo $! > '" + pidFile.toAbsolutePath() + "'; echo ok; exit 0", 30, null);
+        TextGate.Resultado r = TextGate.rodarPre(s, lote(s), List.of());
+        assertEquals("PASS", r.resultado());
+        assertEquals("ok\n", r.saida());
+        long pid = Long.parseLong(Files.readString(pidFile, StandardCharsets.UTF_8).trim());
+        boolean morto = TextGateSigintTest.morre(pid);
+        assertTrue(morto, "filho em segundo plano sobreviveu ao fim do gate");
+    }
+
+    @Test
+    void semSetsidCaiNoKillPorDescendentes() throws Exception {
+        String antes = TextGate.SETSID;
+        TextGate.SETSID = "/definitivamente/sem/setsid";
+        try {
+            mataDescendentesNoTimeout();
+        } finally {
+            TextGate.SETSID = antes;
+        }
     }
 
     @Test

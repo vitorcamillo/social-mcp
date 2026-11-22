@@ -6,12 +6,15 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -51,19 +54,29 @@ public final class TextGate {
                 cmd.add(f.toString());
             }
         }
+        // grupo proprio (setsid -w: com fork, espera e repassa o exit) para matar tudo de uma vez
+        boolean grupo = Files.isExecutable(Path.of(SETSID)) && Files.isExecutable(Path.of(KILL));
+        if (grupo) cmd.addAll(0, List.of(SETSID, "-w"));
         Process p = null;
         try {
-            p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+            // start + registro atomicos frente ao gancho: Ctrl-C entre os dois deixaria o gate orfao
+            synchronized (INICIO) {
+                if (encerrando) return new Resultado(1, "ERRO", "JVM encerrando");
+                p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+                VIVOS.put(p, grupo);
+            }
             p.getOutputStream().close();
             ByteArrayOutputStream buf = new ByteArrayOutputStream();
             InputStream saidaGate = p.getInputStream();
             Thread leitor = Thread.ofVirtual().name("text-gate-saida").unstarted(() -> copiar(saidaGate, buf));
             leitor.start();
             if (!p.waitFor(timeoutSec, TimeUnit.SECONDS)) {
-                matar(p);
+                matar(p, grupo);
                 return new Resultado(1, "ERRO", "gate excedeu " + timeoutSec + "s");
             }
             leitor.join(5000);
+            // sobra em segundo plano: no grupo proprio ela nao veria o Ctrl-C e sairia do registro
+            matar(p, grupo);
             String saida;
             synchronized (buf) {
                 saida = buf.toString(StandardCharsets.UTF_8);
@@ -73,14 +86,52 @@ public final class TextGate {
         } catch (IOException e) {
             return new Resultado(1, "ERRO", String.valueOf(e.getMessage()));
         } catch (InterruptedException e) {
-            matar(p);
+            matar(p, grupo);
             Thread.currentThread().interrupt();
             return new Resultado(1, "ERRO", "gate interrompido");
+        } finally {
+            if (p != null) VIVOS.remove(p);
         }
     }
 
-    /** Fail-closed: gate abandonado (timeout ou interrupcao) nao fica rodando orfao. */
-    private static void matar(Process p) {
+    static String SETSID = "/usr/bin/setsid";
+    static String KILL = "/bin/kill";
+
+    /**
+     * Gates rodando agora. Em grupo proprio o gate nao recebe o Ctrl-C do terminal da CLI; o
+     * gancho de encerramento da JVM (SIGINT/SIGTERM) mata o grupo de cada um.
+     */
+    static final Map<Process, Boolean> VIVOS = new ConcurrentHashMap<>();
+    private static final Object INICIO = new Object();
+    static volatile boolean encerrando;
+
+    static {
+        Runtime.getRuntime().addShutdownHook(new Thread(TextGate::matarVivos, "text-gate-encerramento"));
+    }
+
+    static void matarVivos() {
+        synchronized (INICIO) {
+            encerrando = true; // espera um start em andamento e barra os proximos
+        }
+        VIVOS.forEach(TextGate::matar);
+    }
+
+    /**
+     * Fail-closed: gate abandonado (timeout ou interrupcao) nao fica rodando orfao. O SIGKILL no
+     * grupo pega ate o filho criado durante o kill (o snapshot de descendants() nao pegaria).
+     */
+    private static void matar(Process p, boolean grupo) {
+        if (grupo) {
+            try {
+                Process k = new ProcessBuilder(KILL, "-KILL", "--", "-" + p.pid()).redirectErrorStream(true)
+                        .redirectOutput(ProcessBuilder.Redirect.DISCARD).start();
+                k.waitFor(5, TimeUnit.SECONDS);
+            } catch (IOException e) {
+                // sem kill: fica o fallback por descendants() logo abaixo
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
         p.descendants().forEach(ProcessHandle::destroyForcibly);
         p.destroyForcibly();
     }

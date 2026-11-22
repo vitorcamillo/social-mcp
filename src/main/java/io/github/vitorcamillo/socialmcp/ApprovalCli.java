@@ -26,13 +26,33 @@ public final class ApprovalCli {
         String lerLinha(String prompt);
     }
 
+    /** Teste nao tem TTY (System.console() sempre null): injetavel para exercitar o caso com console. */
+    static Supplier<Object> consoleDoSistema = System::console;
+
     static Terminal terminal = new Terminal() {
-        @Override public boolean interativo() { return System.console() != null; }
+        @Override public boolean interativo() { return terminalReal(consoleDoSistema.get(), Console.class); }
         @Override public String lerLinha(String prompt) {
             Console c = System.console();
             return c == null ? null : c.readLine(prompt);
         }
     };
+
+    /**
+     * TTY de verdade. Ate o JDK 21, System.console() so existe com terminal; do 22 em diante ele
+     * existe tambem com entrada/saida redirecionada (agente) e quem responde e Console.isTerminal().
+     * Na duvida (erro ao perguntar), nao e terminal: fail-closed. O metodo e buscado no tipo
+     * publico (Console), nao na classe concreta, que no JDK 22+ nao e acessivel por reflexao.
+     */
+    static boolean terminalReal(Object console, Class<?> tipo) {
+        if (console == null) return false;
+        try {
+            return Boolean.TRUE.equals(tipo.getMethod("isTerminal").invoke(console));
+        } catch (NoSuchMethodException e) {
+            return true;
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            return false;
+        }
+    }
 
     /** Pontos de injecao para teste; o padrao e o home real, System.exit e o importador real. */
     static Supplier<Path> homePadrao = Store::defaultHome;
