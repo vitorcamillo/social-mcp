@@ -233,7 +233,6 @@ public final class RecipeValidator {
         if (l.contains("id") || l.contains("cid") || l.contains("start") || l.contains("end")) return "123456789";
         if (l.contains("handle") || l.contains("user") || l.contains("profile") || l.contains("nick")) return "example_account";
         if (l.contains("subreddit")) return "brasil";
-        if (l.contains("did")) return "did:plc:exemplo";
         if (l.contains("pasta") || l.contains("board")) return "Shows e eventos";
         return TEXTO_EXEMPLO;
     }

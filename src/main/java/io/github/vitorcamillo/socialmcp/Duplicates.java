@@ -69,12 +69,7 @@ public final class Duplicates {
             // paginas com a mesma legenda perdem justamente o texto que as torna duplicadas.
             if (contaPalavras(normalizar(e.getKey())) >= MIN_PALAVRAS_COMPARAVEL) continue;
             int count = e.getValue();
-            if (n >= 3) {
-                int minimo = Math.min(n, Math.max(4, n / 2 + 1));
-                if (count >= minimo) comum.add(e.getKey());
-            } else if (count == n) {
-                comum.add(e.getKey());
-            }
+            if (count >= Math.min(n, Math.max(4, n / 2 + 1))) comum.add(e.getKey());
         }
         List<String> out = new ArrayList<>(n);
         for (List<String> linhas : linhasPorPagina) {
@@ -97,14 +92,9 @@ public final class Duplicates {
 
     static Set<String> shingles(String normalizado) {
         Set<String> out = new LinkedHashSet<>();
-        if (normalizado == null) return out;
-        String t = normalizado.trim();
-        if (t.isEmpty()) return out;
-        String[] palavras = t.split("\\s+");
-        if (palavras.length < 3) {
-            out.add(t);
-            return out;
-        }
+        String t = normalizado == null ? "" : normalizado.trim();
+        String[] palavras = t.isEmpty() ? new String[0] : t.split("\\s+");
+        if (palavras.length > 0 && palavras.length <= 2) out.add(t);
         for (int i = 0; i + 2 < palavras.length; i++) {
             out.add(palavras[i] + " " + palavras[i + 1] + " " + palavras[i + 2]);
         }
@@ -119,7 +109,6 @@ public final class Duplicates {
     static double jaccard(Set<String> a, Set<String> b) {
         boolean aVazio = a == null || a.isEmpty();
         boolean bVazio = b == null || b.isEmpty();
-        if (aVazio && bVazio) return 0.0;
         Set<String> uniao = new HashSet<>(aVazio ? Set.of() : a);
         uniao.addAll(bVazio ? Set.of() : b);
         if (uniao.isEmpty()) return 0.0;
@@ -148,9 +137,8 @@ public final class Duplicates {
         int[] pai = new int[n];
         for (int i = 0; i < n; i++) pai[i] = i;
         for (int a = 0; a < elegiveis.size(); a++) {
-            for (int b = a + 1; b < elegiveis.size(); b++) {
+            for (int j : elegiveis.subList(a + 1, elegiveis.size())) {
                 int i = elegiveis.get(a);
-                int j = elegiveis.get(b);
                 double s = jaccard(shinglesPorPagina.get(i), shinglesPorPagina.get(j));
                 sim[i][j] = s;
                 sim[j][i] = s;
@@ -166,9 +154,9 @@ public final class Duplicates {
             if (membros.size() < 2) continue;
             double min = Double.MAX_VALUE;
             for (int a = 0; a < membros.size(); a++) {
-                for (int b = a + 1; b < membros.size(); b++) {
-                    double s = sim[membros.get(a)][membros.get(b)];
-                    if (s >= limiar && s < min) min = s;
+                for (int j : membros.subList(a + 1, membros.size())) {
+                    double s = sim[membros.get(a)][j];
+                    if (s >= limiar) min = Math.min(min, s);
                 }
             }
             if (min == Double.MAX_VALUE) continue;
@@ -179,7 +167,7 @@ public final class Duplicates {
                 Pagina p = paginas.get(idx);
                 urls.add(p == null || p.url() == null ? "" : p.url());
                 String resto = restantes.get(idx).replaceAll("\\R", " ");
-                inicios.add(resto.length() > 120 ? resto.substring(0, 120) : resto);
+                inicios.add(resto.substring(0, Math.min(resto.length(), 120)));
             }
             grupos.add(new Grupo(arredondada, List.copyOf(urls), List.copyOf(inicios)));
         }

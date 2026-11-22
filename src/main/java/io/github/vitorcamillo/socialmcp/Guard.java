@@ -37,6 +37,11 @@ public final class Guard {
      * se bloqueia a si mesmo (cota e espacamento contam LOTES, nao passos).
      */
     public static Decision check(Store store, String network, String kind, String currentBatchId) {
+        return check(store, network, kind, currentBatchId, System.currentTimeMillis());
+    }
+
+    /** Variante com relogio injetado (teste); o caminho publico usa System.currentTimeMillis(). */
+    static Decision check(Store store, String network, String kind, String currentBatchId, long agoraMs) {
         if (!store.knownNetworks().contains(network)) {
             return new Decision(false, "rede desconhecida: '" + network + "'. Redes validas: " + store.knownNetworks());
         }
@@ -71,7 +76,7 @@ public final class Guard {
         }
         if (u.lastPublicActionMs > 0) {
             long need = minMin * 60_000L;
-            long elapsed = System.currentTimeMillis() - u.lastPublicActionMs;
+            long elapsed = agoraMs - u.lastPublicActionMs;
             if (elapsed < need) {
                 long faltaMin = (need - elapsed + 59_999) / 60_000;
                 return new Decision(false, "espacamento minimo de " + minMin + " min entre acoes publicas em '"
@@ -188,7 +193,7 @@ public final class Guard {
         int start = Math.max(0, idx - 60);
         int end = Math.min(pageText.length(), idx + pat.length() + 60);
         String ctx = pageText.substring(start, end).replace('\r', ' ').replace('\n', ' ');
-        if (ctx.length() > 160) ctx = ctx.substring(0, 160);
+        ctx = ctx.substring(0, Math.min(ctx.length(), 160));
         return ctx;
     }
 }

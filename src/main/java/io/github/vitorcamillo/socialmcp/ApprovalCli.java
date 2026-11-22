@@ -1,9 +1,12 @@
 package io.github.vitorcamillo.socialmcp;
 
+import java.io.Console;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.IntConsumer;
+import java.util.function.Supplier;
 
 /**
  * CLI do aprovador unico. So roda em terminal, fora do alcance do agente executor.
@@ -25,23 +28,41 @@ public final class ApprovalCli {
 
     static Terminal terminal = new Terminal() {
         @Override public boolean interativo() { return System.console() != null; }
-        @Override public String lerLinha(String prompt) { return System.console().readLine(prompt); }
+        @Override public String lerLinha(String prompt) {
+            Console c = System.console();
+            return c == null ? null : c.readLine(prompt);
+        }
     };
 
+    /** Pontos de injecao para teste; o padrao e o home real, System.exit e o importador real. */
+    static Supplier<Path> homePadrao = Store::defaultHome;
+    static IntConsumer saida = System::exit;
+
+    interface Importador {
+        String importar(Store store, String rede, String arquivo) throws Exception;
+    }
+
+    static Importador importador = SessionImporter::run;
+
     public static void run(String[] args) {
+        int c = principal(args, homePadrao.get());
+        if (args.length > 0) saida.accept(c);
+    }
+
+    /** Nucleo testavel do run(String[]): mesma logica sem chamar System.exit. */
+    static int principal(String[] args, Path home) {
         if (args.length == 0) {
             uso();
-            return;
+            return 0;
         }
         if (args[0].equals("validar-receitas")) {
             // so le: nao cria home/config/journal (o construtor do Store cria o que faltar)
-            Path home = Store.defaultHome();
             if (!homePronta(home)) {
                 System.out.println("ERRO: home do MCP incompleta (" + home + "): falta config.json ou recipes/; nada foi criado");
-                System.exit(1);
+                return 1;
             }
         }
-        System.exit(run(args, new Store()));
+        return run(args, new Store(home));
     }
 
     /** Despachante testavel: devolve o codigo de saida em vez de chamar System.exit. */
@@ -141,7 +162,7 @@ public final class ApprovalCli {
                         System.out.println("uso: import-cookies <rede> <arquivo.json>");
                         return 1;
                     }
-                    System.out.println(SessionImporter.run(store, args[1], args[2]));
+                    System.out.println(importador.importar(store, args[1], args[2]));
                 }
                 case "validar-receitas" -> {
                     RecipeValidator.Relatorio r = RecipeValidator.validar(store, args.length >= 2 ? args[1] : null);

@@ -74,12 +74,12 @@ public class BrowserPool implements AutoCloseable {
         // (stdio, um processo por sessao) pode estar com o Chrome deste profile.
         ObjectNode cfg = store.networkCfg(network);
         int esperaS = cfg.path("profileWaitSeconds").asInt(90);
-        if (esperaS < 0) esperaS = 0;
+        esperaS = Math.max(esperaS, 0);
         long fim = clock.getAsLong() + (long) esperaS * 1000L;
         RuntimeException ultima = null;
         while (true) {
             try {
-                JavaDriverless d = launch(network);
+                JavaDriverless d = abrir(network);
                 drivers.put(network, d);
                 lastUse.put(network, clock.getAsLong());
                 return d;
@@ -91,13 +91,37 @@ public class BrowserPool implements AutoCloseable {
                             + "s (outra sessao do MCP pode estar com ele): " + e.getMessage(), e);
                 }
                 try {
-                    Thread.sleep(5000);
+                    pausar(5000);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     throw ultima;
                 }
             }
         }
+    }
+
+    /**
+     * Abre o Chrome da rede (ponto de injecao para teste: o padrao e o launch real).
+     * Testes sobrescrevem para simular falha sem navegador; comportamento identico.
+     */
+    JavaDriverless abrir(String network) {
+        return launch(network);
+    }
+
+    /**
+     * Pausa entre tentativas do get (ponto de injecao para teste: o padrao e
+     * Thread.sleep). Testes sobrescrevem para avancar relogio falso sem espera real.
+     */
+    void pausar(long ms) throws InterruptedException {
+        Thread.sleep(ms);
+    }
+
+    /**
+     * Cria o driver (ponto de injecao para teste: o padrao constroi o driver real).
+     * Testes sobrescrevem para observar a sessao criada; comportamento identico.
+     */
+    JavaDriverless criarDriver(String n, ChromeOptions options) {
+        return new JavaDriverless("sdk-" + n, options, false);
     }
 
     /**
@@ -117,7 +141,7 @@ public class BrowserPool implements AutoCloseable {
         ChromeOptions options = attachTo.isPresent()
                 ? buildAttachOptions(n, cfg, dir, attachTo.get())
                 : buildOptions(n, cfg, dir);
-        JavaDriverless d = new JavaDriverless("sdk-" + n, options, false);
+        JavaDriverless d = criarDriver(n, options);
         d.setPageLoadTimeout(45_000);
         d.implicitlyWait(4_000);
         instalarGuardaOuFechar(() -> instalarGuarda(d, n), () -> {
@@ -138,15 +162,23 @@ public class BrowserPool implements AutoCloseable {
      * pre-requisicao nunca e usado, pois redirect HTTP ou tardio enviaria dados
      * ao host externo antes da checagem pos-navegacao (Tools.conferirDestino).
      */
-    private void instalarGuarda(JavaDriverless d, String n) {
+    void instalarGuarda(JavaDriverless d, String n) {
         try {
             Target target = d.getChrome().getCurrentTarget().get(WINDOW_CDP_TIMEOUT_S, TimeUnit.SECONDS);
             navGuards.put(n, NavGuard.instalar(target, url -> BatchStore.urlNavegavel(store, n, url)));
         } catch (Exception e) {
-            if (e instanceof InterruptedException) Thread.currentThread().interrupt();
-            throw new IllegalStateException("guarda de navegacao nao instalada para a rede '" + n
-                    + "'; navegador nao sera usado sem interceptacao pre-requisicao", e);
+            throw falhaDeGuarda(n, e);
         }
+    }
+
+    /**
+     * Falha de instalacao da guarda: preserva a flag de interrupcao e monta a causa
+     * (extraido de instalarGuarda sem mudar nada, para teste direto).
+     */
+    static IllegalStateException falhaDeGuarda(String n, Exception e) {
+        if (e instanceof InterruptedException) Thread.currentThread().interrupt();
+        return new IllegalStateException("guarda de navegacao nao instalada para a rede '" + n
+                + "'; navegador nao sera usado sem interceptacao pre-requisicao", e);
     }
 
     /**
@@ -349,14 +381,21 @@ public class BrowserPool implements AutoCloseable {
 
     /** Fecha o Chrome da rede, se aberto; erro no quit nao falha a chamada. */
     public void close(String network) {
-        JavaDriverless d = drivers.remove(network);
-        desarmarGuarda(network);
-        lastUse.remove(network);
-        if (d != null) {
-            try {
-                d.quit();
-            } catch (Exception ignored) {
+        // thread interrompida (ex.: passo cancelado): desarme CDP e quit rodam inteiros, sem o get()
+        // da guarda abortar e engolir a interrupcao; ela volta ao chamador no fim
+        boolean interrompida = Thread.interrupted();
+        try {
+            JavaDriverless d = drivers.remove(network);
+            desarmarGuarda(network);
+            lastUse.remove(network);
+            if (d != null) {
+                try {
+                    d.quit();
+                } catch (Exception ignored) {
+                }
             }
+        } finally {
+            if (interrompida) Thread.currentThread().interrupt();
         }
     }
 
@@ -432,8 +471,7 @@ public class BrowserPool implements AutoCloseable {
         try {
             Object o = d.executeScript(ALERT_TEXT_JS);
             String s = o == null ? "" : String.valueOf(o);
-            if (s.length() > 4000) return s.substring(0, 4000);
-            return s;
+            return s.substring(0, Math.min(s.length(), 4000));
         } catch (Exception e) {
             return "";
         }

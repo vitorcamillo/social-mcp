@@ -119,19 +119,26 @@ public final class NavGuard implements AutoCloseable {
         }
     }
 
+    /**
+     * Desliga o Fetch ANTES de tirar o listener: se o disable falhar, o listener segue
+     * respondendo as pausas (senao a aba ficaria com documentos presos sem resposta).
+     */
     @Override public void close() {
         try {
-            await(cdp.removeCdpListener(EVENTO, listener));
             await(cdp.executeCdpCmd("Fetch.disable", Map.of(), CMD_TIMEOUT_S));
+            await(cdp.removeCdpListener(EVENTO, listener));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Desarme da guarda de navegacao interrompido", e);
         } catch (Exception e) {
             throw new IllegalStateException("Falha ao desarmar a guarda de navegacao", e);
         }
     }
 
-    private static <T> T await(CompletableFuture<T> future) throws Exception {
+    private static void await(CompletableFuture<?> future) throws Exception {
         if (future == null) throw new IllegalStateException("Operacao CDP sem future");
         try {
-            return future.get((long) CMD_TIMEOUT_S, TimeUnit.SECONDS);
+            future.get((long) CMD_TIMEOUT_S, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
             throw new IllegalStateException("Timeout na operacao CDP", e);
         }

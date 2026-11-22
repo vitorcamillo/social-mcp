@@ -6,6 +6,7 @@ import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 class BrowserPoolWindowSizeTest {
 
@@ -55,7 +56,7 @@ class BrowserPoolWindowSizeTest {
     @Test
     void semSombraOuDiferencaAbsurdaNaoMexe() {
         var alvo = new BrowserPool.WindowSize(1280, 900);
-        assertEquals(alvo, BrowserPool.compensateShadow(alvo, 1280));
+        assertSame(alvo, BrowserPool.compensateShadow(alvo, 1280), "sem sombra devolve o proprio alvo");
         assertEquals(alvo, BrowserPool.compensateShadow(alvo, 1300));
         assertEquals(alvo, BrowserPool.compensateShadow(alvo, 1000));
     }

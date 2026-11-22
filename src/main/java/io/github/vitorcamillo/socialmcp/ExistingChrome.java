@@ -110,13 +110,8 @@ public final class ExistingChrome {
     /** Scan real de /proc (PID/exe/cmdline), limitado e tolerante a corrida/permissionamento. */
     public static List<Snapshot> scanProc() {
         List<Snapshot> out = new ArrayList<>();
-        java.nio.file.DirectoryStream<Path> ds;
-        try {
-            ds = Files.newDirectoryStream(Path.of("/proc"));
-        } catch (Exception e) {
-            return out;
-        }
-        try (ds) {
+        // falha ao abrir /proc ou no meio do scan: devolve o que ja coletou (vazio no primeiro caso)
+        try (java.nio.file.DirectoryStream<Path> ds = Files.newDirectoryStream(Path.of("/proc"))) {
             for (Path p : ds) {
                 String name = p.getFileName().toString();
                 long pid;
@@ -128,7 +123,7 @@ public final class ExistingChrome {
                 reread(pid).ifPresent(out::add);
             }
         } catch (Exception ignored) {
-            // /proc instavel no meio do scan: devolve o que ja coletou.
+            // /proc instavel: fica com o que ja coletou.
         }
         return out;
     }
@@ -138,25 +133,28 @@ public final class ExistingChrome {
         String base = "/proc/" + pid;
         try {
             String exe = Files.readSymbolicLink(Path.of(base, "exe")).toString();
-            byte[] raw = Files.readAllBytes(Path.of(base, "cmdline"));
-            if (raw.length == 0) return Optional.empty();
-            List<String> argv = new ArrayList<>();
-            int start = 0;
-            for (int i = 0; i < raw.length; i++) {
-                if (raw[i] == 0) {
-                    argv.add(new String(raw, start, i - start, StandardCharsets.UTF_8));
-                    start = i + 1;
-                }
-            }
-            if (start < raw.length) {
-                argv.add(new String(raw, start, raw.length - start, StandardCharsets.UTF_8));
-            }
-            argv.removeIf(String::isEmpty);
+            List<String> argv = argvDe(Files.readAllBytes(Path.of(base, "cmdline")));
             if (argv.isEmpty()) return Optional.empty();
             return Optional.of(new Snapshot(pid, exe, List.copyOf(argv)));
         } catch (Exception e) {
             return Optional.empty();
         }
+    }
+
+    /** cmdline de /proc (args separados por NUL, final com ou sem NUL) sem args vazios. */
+    static List<String> argvDe(byte[] raw) {
+        List<String> argv = new ArrayList<>();
+        int start = 0;
+        for (int i = 0; i < raw.length; i++) {
+            if (raw[i] == 0) {
+                argv.add(new String(raw, start, i - start, StandardCharsets.UTF_8));
+                start = i + 1;
+            }
+        }
+        // resto sem NUL final (cmdline reescrita); vazio quando terminou em NUL, e sai no removeIf
+        argv.add(new String(raw, start, raw.length - start, StandardCharsets.UTF_8));
+        argv.removeIf(String::isEmpty);
+        return argv;
     }
 
     // ---------- parse ----------
@@ -179,8 +177,7 @@ public final class ExistingChrome {
      */
     static List<String> flatten(List<String> argv) {
         List<String> out = new ArrayList<>();
-        if (argv == null) return out;
-        for (String raw : argv) {
+        for (String raw : argv == null ? List.<String>of() : argv) {
             if (raw == null) continue;
             if (raw.contains("--") && raw.contains(" ")) {
                 for (String piece : raw.trim().split("\\s+(?=--)")) {

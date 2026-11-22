@@ -9,6 +9,9 @@ import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.IntConsumer;
 
 /**
  * Servidor MCP sobre stdio (JSON-RPC newline-delimited).
@@ -17,10 +20,15 @@ import java.nio.charset.StandardCharsets;
 public final class McpServer {
     private McpServer() {}
 
+    // pontos de injecao para teste; o caminho real nao muda
+    static Function<Store, Tools> novasTools = Tools::new;
+    static Consumer<Thread> ganchoSaida = Runtime.getRuntime()::addShutdownHook;
+    static IntConsumer saida = System::exit;
+
     public static void run() throws Exception {
         Store store = new Store();
-        Tools tools = new Tools(store);
-        Runtime.getRuntime().addShutdownHook(new Thread(tools::shutdown));
+        Tools tools = novasTools.apply(store);
+        ganchoSaida.accept(new Thread(tools::shutdown));
 
         BufferedReader in = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
         PrintWriter out = new PrintWriter(new BufferedWriter(new OutputStreamWriter(System.out, StandardCharsets.UTF_8)), false);
@@ -98,6 +106,6 @@ public final class McpServer {
         }
         // stdin fechou (cliente encerrou): mata os Chromes e sai — threads do CDP sao nao-daemon
         tools.shutdown();
-        System.exit(0);
+        saida.accept(0);
     }
 }

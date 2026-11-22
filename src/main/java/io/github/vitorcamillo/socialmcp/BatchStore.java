@@ -19,6 +19,8 @@ import java.util.HexFormat;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 
 /**
  * Ciclo de vida de lotes de acoes: draft -> (dono aprova via CLI) approved -> executed.
@@ -45,9 +47,20 @@ public class BatchStore {
 
     private final Store store;
     volatile Runnable antesDeConfirmarAprovacao = () -> {};
+    /** Gancho de teste: roda entre achar o lote aprovado e move-lo para rejected (corrida com execucao). */
+    volatile Runnable antesDeRevogar = () -> {};
+    /** Gancho de teste: roda logo apos copiar a midia para batches/ (antes de conferir o digest). */
+    volatile Consumer<Path> aposCopiarMidia = p -> {};
+    /** Relogio (ms) da idade da aprovacao; o caminho publico usa System.currentTimeMillis(). */
+    private LongSupplier agoraMs = System::currentTimeMillis;
 
     public BatchStore(Store store) {
         this.store = store;
+    }
+
+    BatchStore(Store store, LongSupplier agoraMs) {
+        this.store = store;
+        this.agoraMs = agoraMs;
     }
 
     public JsonNode draft(String label, JsonNode actions) throws IOException {
@@ -159,7 +172,7 @@ public class BatchStore {
         if (a.has("ifPresent") && !"click".equals(kind)) {
             throw new IllegalArgumentException("acao " + idx + ": ifPresent so vale em click");
         }
-        if (a.has("allowExisting") || "type".equals(kind)) validateAllowExisting(a, idx);
+        if (a.has("allowExisting")) validateAllowExisting(a, idx);
         if (a.has("exact") && !"verify_text".equals(kind)) {
             throw new IllegalArgumentException("acao " + idx + ": exact so vale em verify_text");
         }
@@ -473,7 +486,7 @@ public class BatchStore {
         if (scheme == null) return "(url invalida)";
         String host = uri.getHost();
         String s = host == null ? scheme + ":" : scheme + "://" + host;
-        return s.length() > 120 ? s.substring(0, 120) : s;
+        return s.substring(0, Math.min(s.length(), 120));
     }
 
     /** Host igual/subdominio do dominio registravel do startUrl da rede, ou listado em requestHosts. */
@@ -501,7 +514,7 @@ public class BatchStore {
         String pd = padrao.toLowerCase(java.util.Locale.ROOT).trim();
         if (pd.startsWith("*.")) {
             String suf = pd.substring(1);
-            return suf.length() > 1 && suf.indexOf('*') < 0 && h.endsWith(suf) && h.length() > suf.length();
+            return suf.length() > 1 && !suf.contains("*") && h.endsWith(suf) && h.length() > suf.length();
         }
         return !pd.isEmpty() && pd.indexOf('*') < 0 && h.equals(pd);
     }
@@ -903,8 +916,7 @@ public class BatchStore {
                                 + "' com expect que nao e o texto aprovado do capture_ids nem trecho dele (>= 8 caracteres)");
                     }
                     boolean digitado = false;
-                    for (int j = capIdx + 1; j < i; j++) {
-                        JsonNode t = actions.get(j);
+                    for (JsonNode t : intervalo(actions, capIdx + 1, i)) {
                         if ("type".equals(t.path("kind").asText("")) && eC.equals(t.path("text").asText(""))) {
                             digitado = true;
                             break;
@@ -951,12 +963,10 @@ public class BatchStore {
         java.util.regex.Matcher m = MARCADOR_GOTO_QUALQUER.matcher(url);
         StringBuilder semMarcador = new StringBuilder();
         int ultimo = 0;
-        int primeiro = -1;
         while (m.find()) {
             if (!MARCADOR_GOTO_OK.matcher(m.group()).matches()) {
                 throw new IllegalArgumentException("acao " + idx + ": goto com marcador invalido (use [[novo:NOME]])");
             }
-            if (primeiro < 0) primeiro = m.start();
             semMarcador.append(url, ultimo, m.start()).append('X');
             ultimo = m.end();
         }
@@ -971,10 +981,11 @@ public class BatchStore {
         } catch (java.net.URISyntaxException e) {
             uri = null;
         }
-        int fimScheme = url.indexOf("://");
-        int inicioPath = fimScheme < 0 ? -1 : url.indexOf('/', fimScheme + 3);
+        // aqui so url https absoluta passa: "https://" ocupa 8 chars, entao o path (se existir)
+        // comeca no primeiro '/' depois disso; esquema diferente e recusado de qualquer forma.
+        int inicioPath = url.indexOf('/', 8);
         if (uri == null || !"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null
-                || inicioPath < 0 || primeiro <= inicioPath) {
+                || inicioPath == -1 || url.substring(0, inicioPath).contains("[[")) {
             throw new IllegalArgumentException("acao " + idx + ": [[novo:...]] so no path da url");
         }
     }
@@ -1085,19 +1096,23 @@ public class BatchStore {
         for (int i = 0; i < actions.size(); i++) {
             if (Guard.isPublic(actions.get(i).path("kind").asText(""))) last = i;
         }
-        if (last < 0) return false;
-        for (int i = last + 1; i < actions.size(); i++) {
-            JsonNode a = actions.get(i);
-            if (!"verify_new_id".equals(a.path("kind").asText(""))) continue;
-            String name = a.path("name").asText("");
-            for (int j = 0; j < last; j++) {
-                JsonNode c = actions.get(j);
-                if ("capture_ids".equals(c.path("kind").asText("")) && name.equals(c.path("name").asText(""))) {
-                    return true;
-                }
+        Set<String> capturas = new HashSet<>();
+        for (JsonNode c : intervalo(actions, 0, Math.max(last, 0))) {
+            if ("capture_ids".equals(c.path("kind").asText(""))) capturas.add(c.path("name").asText(""));
+        }
+        for (JsonNode a : intervalo(actions, last + 1, actions.size())) {
+            if ("verify_new_id".equals(a.path("kind").asText("")) && capturas.contains(a.path("name").asText(""))) {
+                return true;
             }
         }
         return false;
+    }
+
+    /** Elementos de actions em [de, ate); evita depender de fronteira de indice no laco. */
+    private static List<JsonNode> intervalo(JsonNode actions, int de, int ate) {
+        List<JsonNode> lista = new ArrayList<>();
+        actions.forEach(lista::add);
+        return lista.subList(de, ate);
     }
 
     /** Soma das esperas do lote (wait e o prazo do verify_absent) ate WAIT_BATCH_MAX_MS. */
@@ -1181,7 +1196,7 @@ public class BatchStore {
         try (InputStream in = Files.newInputStream(p)) {
             byte[] buf = new byte[8192];
             int n;
-            while ((n = in.read(buf)) > 0) md.update(buf, 0, n);
+            while ((n = in.read(buf)) != -1) md.update(buf, 0, n);
         }
         return HexFormat.of().formatHex(md.digest());
     }
@@ -1238,6 +1253,7 @@ public class BatchStore {
                     Path copia = store.batchesDir().resolve(id + "-media-" + i + sufixo + "-" + real.getFileName());
                     Files.copy(real, copia, StandardCopyOption.REPLACE_EXISTING);
                     criadas.add(copia);
+                    aposCopiarMidia.accept(copia);
                     if (!hash.equals(sha256Arquivo(copia))) {
                         Files.deleteIfExists(copia);
                         throw new IllegalStateException("copia da midia do passo " + (i + 1) + " divergiu na aprovacao");
@@ -1338,7 +1354,7 @@ public class BatchStore {
         }
         verificarMidias(id, b);
         long horas = store.defaultsCfg().path("gate").path("maxApprovalAgeHours").asLong(24);
-        long idadeMs = System.currentTimeMillis() - b.path("approvedAt").asLong(0);
+        long idadeMs = agoraMs.getAsLong() - b.path("approvedAt").asLong(0);
         if (idadeMs > horas * 3_600_000L) {
             recusar(id, net, "aprovacao_vencida");
             throw new IllegalStateException("aprovacao do lote " + id + " venceu (" + horas + "h); rejeite e reaprove");
@@ -1507,6 +1523,7 @@ public class BatchStore {
             if (Files.exists(approved)) {
                 // Aprovacao ou revogacao compete pelo mesmo rename do estado aprovado.
                 try {
+                    antesDeRevogar.run();
                     Files.move(approved, rejected, StandardCopyOption.ATOMIC_MOVE);
                 } catch (AtomicMoveNotSupportedException unsupported) {
                     Files.move(approved, rejected);
@@ -1667,29 +1684,30 @@ public class BatchStore {
 
     public List<String> list() throws IOException {
         List<String> out = new ArrayList<>();
-        if (!Files.isDirectory(store.batchesDir())) return out;
-        try (var s = Files.list(store.batchesDir())) {
-            List<Path> files = s.filter(p -> {
-                String n = p.getFileName().toString();
-                return n.endsWith(".draft.json") || n.endsWith(".approved.json") || n.endsWith(".running.json")
-                        || n.endsWith(".executed.json") || n.endsWith(".rejected.json");
-            }).sorted().toList();
-            for (Path p : files) {
-                try {
-                    JsonNode b = Json.parse(Files.readString(p, StandardCharsets.UTF_8));
-                    String linha = b.path("id").asText(p.getFileName().toString()) + "  "
-                            + b.path("status").asText("?") + "  "
-                            + b.path("label").asText("?") + "  ("
-                            + b.path("actions").size() + " acoes)";
-                    if ("executed".equals(b.path("status").asText(""))
-                            && b.path("result").path("abortado").asBoolean(false)) {
-                        String conf = b.path("result").path("conferencia").asText("");
-                        if (conf.isBlank()) conf = "sem_conferencia";
-                        linha += "  [abortado: " + conf + "]";
+        if (Files.isDirectory(store.batchesDir())) {
+            try (var s = Files.list(store.batchesDir())) {
+                List<Path> files = s.filter(p -> {
+                    String n = p.getFileName().toString();
+                    return n.endsWith(".draft.json") || n.endsWith(".approved.json") || n.endsWith(".running.json")
+                            || n.endsWith(".executed.json") || n.endsWith(".rejected.json");
+                }).sorted().toList();
+                for (Path p : files) {
+                    try {
+                        JsonNode b = Json.parse(Files.readString(p, StandardCharsets.UTF_8));
+                        String linha = b.path("id").asText(p.getFileName().toString()) + "  "
+                                + b.path("status").asText("?") + "  "
+                                + b.path("label").asText("?") + "  ("
+                                + b.path("actions").size() + " acoes)";
+                        if ("executed".equals(b.path("status").asText(""))
+                                && b.path("result").path("abortado").asBoolean(false)) {
+                            String conf = b.path("result").path("conferencia").asText("");
+                            if (conf.isBlank()) conf = "sem_conferencia";
+                            linha += "  [abortado: " + conf + "]";
+                        }
+                        out.add(linha);
+                    } catch (Exception e) {
+                        out.add(p.getFileName().toString() + "  (ilegivel: " + e.getMessage() + ")");
                     }
-                    out.add(linha);
-                } catch (Exception e) {
-                    out.add(p.getFileName().toString() + "  (ilegivel: " + e.getMessage() + ")");
                 }
             }
         }

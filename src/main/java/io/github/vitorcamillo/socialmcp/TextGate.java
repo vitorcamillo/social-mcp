@@ -51,16 +51,16 @@ public final class TextGate {
                 cmd.add(f.toString());
             }
         }
+        Process p = null;
         try {
-            Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+            p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
             p.getOutputStream().close();
             ByteArrayOutputStream buf = new ByteArrayOutputStream();
-            Thread leitor = new Thread(() -> copiar(p.getInputStream(), buf), "text-gate-saida");
-            leitor.setDaemon(true);
+            InputStream saidaGate = p.getInputStream();
+            Thread leitor = Thread.ofVirtual().name("text-gate-saida").unstarted(() -> copiar(saidaGate, buf));
             leitor.start();
             if (!p.waitFor(timeoutSec, TimeUnit.SECONDS)) {
-                p.descendants().forEach(ProcessHandle::destroyForcibly);
-                p.destroyForcibly();
+                matar(p);
                 return new Resultado(1, "ERRO", "gate excedeu " + timeoutSec + "s");
             }
             leitor.join(5000);
@@ -73,16 +73,23 @@ public final class TextGate {
         } catch (IOException e) {
             return new Resultado(1, "ERRO", String.valueOf(e.getMessage()));
         } catch (InterruptedException e) {
+            matar(p);
             Thread.currentThread().interrupt();
             return new Resultado(1, "ERRO", "gate interrompido");
         }
+    }
+
+    /** Fail-closed: gate abandonado (timeout ou interrupcao) nao fica rodando orfao. */
+    private static void matar(Process p) {
+        p.descendants().forEach(ProcessHandle::destroyForcibly);
+        p.destroyForcibly();
     }
 
     private static void copiar(InputStream in, ByteArrayOutputStream buf) {
         byte[] b = new byte[8192];
         try (in) {
             int n;
-            while ((n = in.read(b)) > 0) {
+            while ((n = in.read(b)) != -1) {
                 synchronized (buf) {
                     buf.write(b, 0, n);
                 }
@@ -91,6 +98,8 @@ public final class TextGate {
             // processo morto: fica com o que ja foi lido
         }
     }
+
+    private static final String[] NOMES = {"PASS", "WARN", "FAIL", "ERRO"};
 
     private static int severidade(String r) {
         return switch (r) {
@@ -120,7 +129,7 @@ public final class TextGate {
             try {
                 String r = Json.parse(l).path("resultado").asText("").trim().toUpperCase();
                 if (List.of("PASS", "WARN", "FAIL", "ERRO").contains(r)) {
-                    return severidade(r) >= severidade(doExit) ? r : doExit;
+                    return NOMES[Math.max(severidade(r), severidade(doExit))];
                 }
             } catch (RuntimeException ignored) {
                 // cai para o exit

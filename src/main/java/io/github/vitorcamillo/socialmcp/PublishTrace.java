@@ -91,11 +91,9 @@ public final class PublishTrace implements AutoCloseable {
         this.clockMillis = clockMillis;
         this.startedAt = clockMillis.getAsLong();
         this.bodyExecutor = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
-                new ArrayBlockingQueue<>(16), r -> {
-                    Thread t = new Thread(r, "publish-trace-body");
-                    t.setDaemon(true);
-                    return t;
-                }, new ThreadPoolExecutor.AbortPolicy());
+                new ArrayBlockingQueue<>(16),
+                Thread.ofPlatform().name("publish-trace-body").daemon(true).factory(),
+                new ThreadPoolExecutor.AbortPolicy());
     }
 
     public static PublishTrace start(Target target, String network, String approvedText) {
@@ -120,7 +118,6 @@ public final class PublishTrace implements AutoCloseable {
             trace.await(cdp.executeCdpCmd("Network.enable", Map.of("maxResourceBufferSize", 256 * 1024, "maxTotalBufferSize", 1024 * 1024), (float) OP_TIMEOUT_SECONDS));
             return trace;
         } catch (Exception e) {
-            trace.markInvalid(e);
             try { trace.close(); } catch (RuntimeException cleanup) { e.addSuppressed(cleanup); }
             throw new IllegalStateException("Nao foi possivel iniciar captura passiva", e);
         }
@@ -221,8 +218,7 @@ public final class PublishTrace implements AutoCloseable {
         try {
             String path = URI.create(url).getPath();
             if (path == null) return;
-            if (path.length() > 100) path = path.substring(0, 100);
-            pathsWithText.add(path);
+            pathsWithText.add(path.substring(0, Math.min(path.length(), 100)));
         } catch (RuntimeException ignored) {
             // URL invalida: ignora registro de caminho
         }
@@ -244,7 +240,8 @@ public final class PublishTrace implements AutoCloseable {
         if (expiredOrInvalid()) return;
         String requestId = params.path("requestId").asText("");
         RequestState state = requests.get(requestId);
-        if (state == null || state.status < 200 || state.status >= 300 || state.queued) return;
+        // status >= 300 nunca chega aqui: onResponse ja tirou o pedido do mapa
+        if (state == null || state.status < 200 || state.queued) return;
         state.finished = true;
         state.queued = true;
         try {
@@ -294,8 +291,7 @@ public final class PublishTrace implements AutoCloseable {
                     state = current;
                     comTexto++;
                     if (state.path != null && pathsWithText.size() < 5) {
-                        String p = state.path.length() > 100 ? state.path.substring(0, 100) : state.path;
-                        pathsWithText.add(p);
+                        pathsWithText.add(state.path.substring(0, Math.min(state.path.length(), 100)));
                     }
                     if (network.equals("bsky")) {
                         state.postData = postData;
@@ -482,24 +478,19 @@ public final class PublishTrace implements AutoCloseable {
     }
 
     private boolean allowedHost(String url) {
-        try {
-            if (!hostBase(url)) return false;
-            URI uri = URI.create(url);
-            String host = uri.getHost();
-            String path = uri.getPath();
-            if (host == null) return false;
-            host = host.toLowerCase(Locale.ROOT);
-            return switch (network) {
-                case "bsky" -> path.equals("/xrpc/com.atproto.repo.createRecord") || path.equals("/xrpc/com.atproto.repo.applyWrites");
-                case "mastodon" -> host.equals("mastodon.social") && path.equals("/api/v1/statuses");
-                case "x" -> path.matches("^/i/api/graphql/[A-Za-z0-9_-]+/CreateTweet$");
-                case "pinterest" -> path.equals("/resource/PinResource/create/");
-                case "reddit" -> path.matches("^/svc/shreddit/t[13]_[a-z0-9]{1,16}/create-comment$");
-                default -> true;
-            };
-        } catch (RuntimeException e) {
-            return false;
-        }
+        // hostBase ja parseou a URL e exigiu host: aqui a URI e hierarquica (path nunca null)
+        if (!hostBase(url)) return false;
+        URI uri = URI.create(url);
+        String host = uri.getHost().toLowerCase(Locale.ROOT);
+        String path = uri.getPath();
+        return switch (network) {
+            case "bsky" -> path.equals("/xrpc/com.atproto.repo.createRecord") || path.equals("/xrpc/com.atproto.repo.applyWrites");
+            case "mastodon" -> host.equals("mastodon.social") && path.equals("/api/v1/statuses");
+            case "x" -> path.matches("^/i/api/graphql/[A-Za-z0-9_-]+/CreateTweet$");
+            case "pinterest" -> path.equals("/resource/PinResource/create/");
+            case "reddit" -> path.matches("^/svc/shreddit/t[13]_[a-z0-9]{1,16}/create-comment$");
+            default -> true;
+        };
     }
 
     private boolean containsApprovedText(String body) {
@@ -516,7 +507,7 @@ public final class PublishTrace implements AutoCloseable {
     private static String stripXssi(String body) {
         if (body.startsWith(")]}'")) {
             int newline = body.indexOf('\n');
-            return newline < 0 ? "" : body.substring(newline + 1);
+            return newline == -1 ? "" : body.substring(newline + 1);
         }
         for (String prefix : List.of("for(;;);", "for(;;)", "for (;;);", "for (;;)")) {
             if (body.startsWith(prefix)) return body.substring(prefix.length());

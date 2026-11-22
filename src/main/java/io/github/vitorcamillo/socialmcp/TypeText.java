@@ -64,8 +64,7 @@ final class TypeText {
      */
     static List<String> chunks(String text, Random rnd) {
         List<String> out = new ArrayList<>();
-        if (text == null || text.isEmpty()) return out;
-        String t = text.replace("\r\n", "\n").replace('\r', '\n');
+        String t = text == null ? "" : text.replace("\r\n", "\n").replace('\r', '\n');
         BreakIterator it = BreakIterator.getCharacterInstance(Locale.ROOT);
         it.setText(t);
         StringBuilder cur = new StringBuilder();
@@ -96,15 +95,23 @@ final class TypeText {
 
     /** Insere o texto no elemento focado via CDP Input.insertText, pedaco a pedaco. Devolve o numero de pedacos. */
     static int insert(JavaDriverless d, String text, long[] delayMs, Random rnd) throws Exception {
-        List<String> parts = chunks(text, rnd);
         io.github.selenium.javaDriverless.types.Target t = d.getChrome().getCurrentTarget()
                 .get(CDP_TIMEOUT_S, TimeUnit.SECONDS);
+        return insert(p -> t.executeCdpCmd("Input.insertText", Map.of("text", p), (float) CDP_TIMEOUT_S)
+                .get(CDP_TIMEOUT_S + 2, TimeUnit.SECONDS), text, delayMs, rnd);
+    }
+
+    interface Envio { void enviar(String pedaco) throws Exception; }
+    interface Pausa { void dormir(long ms) throws InterruptedException; }
+    static Pausa pausa = Thread::sleep;
+
+    /** Laco do insert sem CDP: envia cada pedaco e dorme entre eles (nao depois do ultimo). */
+    static int insert(Envio envio, String text, long[] delayMs, Random rnd) throws Exception {
+        List<String> parts = chunks(text, rnd);
         for (int i = 0; i < parts.size(); i++) {
-            t.executeCdpCmd("Input.insertText", Map.of("text", parts.get(i)), (float) CDP_TIMEOUT_S)
-                    .get(CDP_TIMEOUT_S + 2, TimeUnit.SECONDS);
+            envio.enviar(parts.get(i));
             if (i < parts.size() - 1) {
-                long span = delayMs[1] - delayMs[0];
-                Thread.sleep(delayMs[0] + (span > 0 ? (long) (rnd.nextDouble() * span) : 0));
+                pausa.dormir(delayMs[0] + (long) (rnd.nextDouble() * Math.max(0, delayMs[1] - delayMs[0])));
             }
         }
         return parts.size();

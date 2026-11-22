@@ -64,27 +64,31 @@ public class Tools {
         return falhas;
     }
 
+    static Thread threadDoIdle(Runnable r) {
+        Thread t = new Thread(r, "social-mcp-idle");
+        t.setDaemon(true);
+        return t;
+    }
+
+    void tarefaIdle() {
+        try {
+            synchronized (chamada) {
+                List<String> f = pool.closeIdle();
+                if (!f.isEmpty()) System.err.println("[social-mcp] Chrome ocioso fechado: " + f);
+            }
+        } catch (Exception e) {
+            System.err.println("[social-mcp] falha ao fechar Chrome ocioso: " + e.getMessage());
+        }
+    }
+
     public Tools(Store store) {
         this.store = store;
         this.batches = new BatchStore(store);
         this.pool = new BrowserPool(store);
         this.recipes = new Recipes(store);
         this.defs = (ArrayNode) Json.parse(TOOL_DEFS);
-        this.idle = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "social-mcp-idle");
-            t.setDaemon(true);
-            return t;
-        });
-        this.idle.scheduleAtFixedRate(() -> {
-            try {
-                synchronized (chamada) {
-                    List<String> f = pool.closeIdle();
-                    if (!f.isEmpty()) System.err.println("[social-mcp] Chrome ocioso fechado: " + f);
-                }
-            } catch (Exception e) {
-                System.err.println("[social-mcp] falha ao fechar Chrome ocioso: " + e.getMessage());
-            }
-        }, 60, 60, TimeUnit.SECONDS);
+        this.idle = Executors.newSingleThreadScheduledExecutor(Tools::threadDoIdle);
+        this.idle.scheduleAtFixedRate(this::tarefaIdle, 60, 60, TimeUnit.SECONDS);
     }
 
     public void shutdown() {
@@ -411,10 +415,9 @@ public class Tools {
         String erro = null;
         boolean trip = false;
         int n = 1;
-        prazoFimMs = System.currentTimeMillis() + PRAZO_LOTE_MS;
-        capturas.clear();
-        idsNovosLote.clear();
-        int traceCleanupFailures = fecharTraces();
+        prazoFimMs = relogio.getAsLong() + PRAZO_LOTE_MS;
+        // capturas/idsNovosLote/traces ja chegam vazios: todo chamador de runStep os limpa no finally
+        int traceCleanupFailures = 0;
         try {
             for (JsonNode a : plan.steps()) {
                 String kind = a.path("kind").asText();
@@ -612,6 +615,10 @@ public class Tools {
             out.put("tripwire", trip);
             return Json.writePretty(out);
         } finally {
+            // capture_ids da sonda nao pode vazar captura nem listener CDP para o proximo lote
+            // (idsNovosLote so e preenchido no lote, que ja o limpa no proprio finally)
+            capturas.clear();
+            fecharTraces();
             try {
                 if (store.networkCfg(network).path("closeAfterBatch").asBoolean(true)) {
                     pool.close(network);
@@ -629,7 +636,7 @@ public class Tools {
      */
     private String findDuplicates(JsonNode args) throws Exception {
         String network = args.path("network").asText("");
-        requireNetwork(network);
+        // rede desconhecida: recipes.prepare (abaixo, antes de qualquer efeito) recusa com a mesma mensagem
         int maxPosts = args.path("maxPosts").asInt(12);
         maxPosts = Math.min(30, Math.max(1, maxPosts));
         double limiar = args.path("limiar").asDouble(0.6);
@@ -657,19 +664,8 @@ public class Tools {
             JsonNode extraido = passo.path("extraido");
             if (!extraido.isArray()) continue;
             for (JsonNode item : extraido) {
-                String cand;
-                if (item.isTextual()) {
-                    cand = item.asText();
-                } else if (item.isObject()) {
-                    cand = item.path("href").asText("");
-                    if (cand.isBlank()) cand = item.path("url").asText("");
-                } else {
-                    cand = item.asText("");
-                }
-                if (cand == null) continue;
-                cand = cand.trim();
-                int hash = cand.indexOf('#');
-                if (hash >= 0) cand = cand.substring(0, hash);
+                // extract so produz strings (rjLinks devolve hrefs; texto devolve linhas)
+                String cand = item.asText("").trim().split("#", 2)[0];
                 if (cand.startsWith("http://") || cand.startsWith("https://")) urls.add(cand);
                 if (urls.size() >= maxPosts) break;
             }
@@ -696,7 +692,7 @@ public class Tools {
                 BatchStore.validarNavegacao(store, network, url);
                 JavaDriverless d = pool.get(network);
                 d.get(url);
-                d.sleep(2.0 + Math.random() * 2.0);
+                dormir((long) ((2.0 + sorteio.getAsDouble() * 2.0) * 1000));
                 conferirDestino(d, network);
                 int maxChars = store.networkCfg(network).path("pageTextMaxChars").asInt(12_000);
                 String texto = BrowserPool.visibleText(d, maxChars);
@@ -716,7 +712,7 @@ public class Tools {
                         try {
                             doItem = RealClick.text(el(d, sel));
                         } catch (Exception e) {
-                            if (tentativa < VERIFY_TENTATIVAS) Thread.sleep(1_000);
+                            if (tentativa < VERIFY_TENTATIVAS) pausa.dormir(1_000);
                         }
                     }
                     if (doItem == null) {
@@ -910,7 +906,7 @@ public class Tools {
             }
             if (u.lastPublicActionMs > 0) {
                 long need = store.networkCfg(net).path("minMinutesBetweenPublicActions").asInt(30) * 60_000L;
-                long falta = need - (System.currentTimeMillis() - u.lastPublicActionMs);
+                long falta = need - (relogio.getAsLong() - u.lastPublicActionMs);
                 if (falta > 0) {
                     throw new IllegalStateException("espacamento de '" + net + "' insuficiente; proxima acao publica liberada em ~"
                             + ((falta + 59_999) / 60_000) + " min");
@@ -931,17 +927,16 @@ public class Tools {
         boolean duplicataSuspeita = false;
         boolean textoDivergente = false;
         String abortReason = null;
-        long inicio = System.currentTimeMillis();
+        long inicio = relogio.getAsLong();
         prazoFimMs = inicio + PRAZO_LOTE_MS;
-        capturas.clear();
-        idsNovosLote.clear();
-        int traceCleanupFailures = fecharTraces();
+        // capturas/idsNovosLote/traces ja chegam vazios: todo chamador de runStep os limpa no finally
+        int traceCleanupFailures = 0;
         try {
             for (int passoIdx = 0; passoIdx < actions.size(); passoIdx++) {
                 JsonNode a = actions.get(passoIdx);
                 String network = a.path("network").asText();
                 String kind = a.path("kind").asText();
-                if (System.currentTimeMillis() >= prazoFimMs) {
+                if (relogio.getAsLong() >= prazoFimMs) {
                     abortReason = "prazo do lote (" + (PRAZO_LOTE_MS / 1000) + " s) esgotado antes do passo " + (done + 1)
                             + "; a chamada MCP seria cortada pelo cliente";
                     break;
@@ -1006,7 +1001,8 @@ public class Tools {
                         if (ehEnvio(actions, passoIdx)) envioFeito = true;
                         journalAction(store, network, kind, a, id, step, false);
                     }
-                    if ("request".equals(kind) && (step.path("status").asInt(0) > 0 || step.path("incerto").asBoolean(false))) {
+                    // status 0 = resultado incerto (sempre marcado); sem status ou < 0 = fetch nem saiu
+                    if ("request".equals(kind) && step.path("status").asInt(-1) >= 0) {
                         String snippetTw3 = step.path("bodySnippet").asText("");
                         String padraoTw3 = Guard.tripwireMatch(snippetTw3, store.networkCfg(network));
                         if (padraoTw3 != null) {
@@ -1053,7 +1049,7 @@ public class Tools {
             String avisoAnterior = summary.path("AVISO").asText("");
             summary.put("AVISO", avisoAnterior.isEmpty() ? avisoCleanup : avisoAnterior + " " + avisoCleanup);
         }
-        summary.put("duracaoMs", System.currentTimeMillis() - inicio);
+        summary.put("duracaoMs", relogio.getAsLong() - inicio);
         ObjectNode idsNovos = Json.obj();
         for (JsonNode st : results) {
             if ("verify_new_id".equals(st.path("kind").asText("")) && st.path("ok").asBoolean(false) && st.has("idNovo")) {
@@ -1194,7 +1190,7 @@ public class Tools {
         }
         if ("verify_new_id".equals(kind)) {
             String id = step.path("idNovo").asText("");
-            j.put("idNovo", id.length() > 200 ? id.substring(0, 200) : id);
+            j.put("idNovo", id.substring(0, Math.min(id.length(), 200)));
         }
         if ("request".equals(kind)) {
             j.put("url", a.path("url").asText(""));
@@ -1202,7 +1198,7 @@ public class Tools {
             j.put("status", step.path("status").asInt(0));
             if (a.path("auth").isObject()) j.putObject("auth").put("from", a.path("auth").path("from").asText(""));
             String b = step.path("bodySnippet").asText("");
-            j.put("bodySnippet", b.length() > 300 ? b.substring(0, 300) : b);
+            j.put("bodySnippet", b.substring(0, Math.min(b.length(), 300)));
             if (step.path("incerto").asBoolean(false)) j.put("incerto", true);
             j.put("ok", ok);
         }
@@ -1414,7 +1410,7 @@ public class Tools {
                     visto = "(elemento indisponivel: " + e.getMessage() + ")";
                 }
             }
-            if (tentativa < VERIFY_TENTATIVAS) Thread.sleep(1_000);
+            if (tentativa < VERIFY_TENTATIVAS) pausa.dormir(1_000);
         }
         if (sel.isBlank()) {
             throw new IllegalStateException("verify_text falhou: '" + expect + "' nao encontrado na pagina ("
@@ -1442,7 +1438,7 @@ public class Tools {
             } catch (Exception e) {
                 visto = "(elemento indisponivel: " + e.getMessage() + ")";
             }
-            if (tentativa < VERIFY_TENTATIVAS) Thread.sleep(1_000);
+            if (tentativa < VERIFY_TENTATIVAS) pausa.dormir(1_000);
         }
         throw new IllegalStateException("verify_attr falhou: '" + sel + "' tem " + attr + "="
                 + (visto == null ? "(ausente)" : "'" + corta(visto, 120) + "'") + ", esperado '" + expect + "' ("
@@ -1458,17 +1454,17 @@ public class Tools {
     private String runVerifyAbsent(JavaDriverless d, JsonNode a) throws InterruptedException {
         String sel = a.path("selector").asText();
         String expect = a.path("expect").asText("");
-        long resta = Math.max(1, prazoFimMs - System.currentTimeMillis());
+        long resta = Math.max(1, prazoFimMs - relogio.getAsLong());
         long timeout = Math.min(Math.min(Math.max(a.path("timeoutMs").asLong(BatchStore.WAIT_DEFAULT_TIMEOUT_MS), 1),
                 BatchStore.WAIT_EXPECT_MAX_MS), resta);
-        long inicio = System.currentTimeMillis();
+        long inicio = relogio.getAsLong();
         String js = ShadowDom.countScript(sel, expect);
         int n;
         String erro = null;
         while (true) {
             try {
                 Object o = d.executeScript(js);
-                n = o instanceof Number num ? num.intValue() : Integer.parseInt(String.valueOf(o).trim());
+                n = ((Number) o).intValue(); // countScript sempre devolve numero; outro tipo cai no catch (n = -1)
                 erro = null;
             } catch (Exception e) {
                 n = -1;
@@ -1476,10 +1472,10 @@ public class Tools {
             }
             if (n == 0) {
                 return "ausente" + (expect.isEmpty() ? "" : " (nenhum com '" + corta(expect, 60) + "')")
-                        + " em " + (System.currentTimeMillis() - inicio) + " ms";
+                        + " em " + (relogio.getAsLong() - inicio) + " ms";
             }
-            if (System.currentTimeMillis() - inicio >= timeout) break;
-            Thread.sleep(WAIT_POLL_MS);
+            if (relogio.getAsLong() - inicio >= timeout) break;
+            pausa.dormir(WAIT_POLL_MS);
         }
         if (erro != null) {
             throw new IllegalStateException("verify_absent falhou: nao conseguiu avaliar '" + sel + "' (" + corta(erro, 160) + ")");
@@ -1495,7 +1491,7 @@ public class Tools {
     private String runCaptureIds(JavaDriverless d, JsonNode a, ObjectNode out) throws Exception {
         String name = a.path("name").asText();
         NewIds.Spec spec = NewIds.Spec.of(a);
-        long resta = Math.max(1, prazoFimMs - System.currentTimeMillis());
+        long resta = Math.max(1, prazoFimMs - relogio.getAsLong());
         long limite = Math.min(a.path("waitMs").asLong(BatchStore.WAIT_CAPTURE_DEFAULT_MS), resta);
         NewIds.Captura c = NewIds.capturar(d::executeScript, NewIds.real(), spec, limite);
         capturas.put(name, c);
@@ -1526,7 +1522,7 @@ public class Tools {
         }
         NewIds.Spec spec = NewIds.Spec.of(a);
         String expect = a.path("expect").asText("");
-        long resta = Math.max(1, prazoFimMs - System.currentTimeMillis());
+        long resta = Math.max(1, prazoFimMs - relogio.getAsLong());
         long timeout = Math.min(Math.min(Math.max(a.path("timeoutMs").asLong(BatchStore.WAIT_DEFAULT_TIMEOUT_MS), 1),
                 BatchStore.WAIT_EXPECT_MAX_MS), resta);
         NewIds.Novo novo;
@@ -1592,17 +1588,17 @@ public class Tools {
      * no prazo do lote.
      */
     private String runWait(JavaDriverless d, JsonNode a) throws InterruptedException {
-        long resta = Math.max(1, prazoFimMs - System.currentTimeMillis());
+        long resta = Math.max(1, prazoFimMs - relogio.getAsLong());
         if (a.hasNonNull("ms")) {
             long ms = Math.min(Math.min(Math.max(a.get("ms").asLong(), 1), BatchStore.WAIT_MAX_MS), resta);
-            Thread.sleep(ms);
+            pausa.dormir(ms);
             return "esperou " + ms + " ms";
         }
         String expect = a.path("expect").asText();
         String sel = a.path("selector").asText("");
         long timeout = Math.min(Math.min(Math.max(a.path("timeoutMs").asLong(BatchStore.WAIT_DEFAULT_TIMEOUT_MS), 1),
                 BatchStore.WAIT_EXPECT_MAX_MS), resta);
-        long inicio = System.currentTimeMillis();
+        long inicio = relogio.getAsLong();
         while (true) {
             String visto;
             if (sel.isBlank()) {
@@ -1615,10 +1611,10 @@ public class Tools {
                 }
             }
             if (visto.contains(expect)) {
-                return (sel.isBlank() ? "texto" : "texto do elemento") + " apareceu em " + (System.currentTimeMillis() - inicio) + " ms";
+                return (sel.isBlank() ? "texto" : "texto do elemento") + " apareceu em " + (relogio.getAsLong() - inicio) + " ms";
             }
-            if (System.currentTimeMillis() - inicio >= timeout) break;
-            Thread.sleep(WAIT_POLL_MS);
+            if (relogio.getAsLong() - inicio >= timeout) break;
+            pausa.dormir(WAIT_POLL_MS);
         }
         throw new IllegalStateException("wait: '" + expect + "' nao apareceu" + (sel.isBlank() ? "" : " em '" + sel + "'")
                 + " em " + timeout + " ms");
@@ -1687,40 +1683,26 @@ public class Tools {
         List<java.nio.file.Path> arquivos = new java.util.ArrayList<>();
         List<String> nomes = new java.util.ArrayList<>();
         long bytes = 0;
-        if (batch == null) {
-            if (multiplo) {
-                for (JsonNode path : a.path("paths")) {
-                    java.nio.file.Path real = BatchStore.validateUploadFile(store, path, passoIdx);
-                    arquivos.add(real);
-                    nomes.add(real.getFileName().toString());
-                    bytes += Files.size(real);
-                }
-            } else {
-                java.nio.file.Path real = BatchStore.validateUploadFile(store, a.get("path"), passoIdx);
-                arquivos.add(real);
-                nomes.add(real.getFileName().toString());
-                bytes = Files.size(real);
-            }
-        } else {
-            List<JsonNode> midias = multiplo ? BatchStore.midiasDoPasso(batch, passoIdx)
-                    : java.util.Collections.singletonList(BatchStore.midiaDoPasso(batch, passoIdx));
-            if (midias.isEmpty() || (multiplo && midias.size() != a.path("paths").size())) {
+        // set_file nao e READ_KIND nem passo da sonda: so roda em lote aprovado, sempre pela copia com digest
+        if (batch == null) throw new IllegalStateException("set_file so roda em lote aprovado");
+        List<JsonNode> midias = multiplo ? BatchStore.midiasDoPasso(batch, passoIdx)
+                : java.util.Collections.singletonList(BatchStore.midiaDoPasso(batch, passoIdx));
+        if (midias.isEmpty() || (multiplo && midias.size() != a.path("paths").size())) {
+            throw new IllegalStateException("set_file sem digest de midia aprovado no passo " + (passoIdx + 1));
+        }
+        for (int i = 0; i < midias.size(); i++) {
+            JsonNode midia = midias.get(i);
+            if (midia == null || midia.path("sha256").asText("").isBlank()
+                    || (multiplo && midia.path("indice").asInt(-1) != i)) {
                 throw new IllegalStateException("set_file sem digest de midia aprovado no passo " + (passoIdx + 1));
             }
-            for (int i = 0; i < midias.size(); i++) {
-                JsonNode midia = midias.get(i);
-                if (midia == null || midia.path("sha256").asText("").isBlank()
-                        || (multiplo && midia.path("indice").asInt(-1) != i)) {
-                    throw new IllegalStateException("set_file sem digest de midia aprovado no passo " + (passoIdx + 1));
-                }
-                java.nio.file.Path real = BatchStore.copiaAprovada(store, midia);
-                if (!Files.isRegularFile(real) || !midia.path("sha256").asText().equals(BatchStore.sha256Arquivo(real))) {
-                    throw new IllegalStateException("copia aprovada da midia do passo " + (passoIdx + 1) + " ausente ou alterada");
-                }
-                arquivos.add(real);
-                nomes.add(midia.path("arquivo").asText(real.getFileName().toString()));
-                bytes += Files.size(real);
+            java.nio.file.Path real = BatchStore.copiaAprovada(store, midia);
+            if (!Files.isRegularFile(real) || !midia.path("sha256").asText().equals(BatchStore.sha256Arquivo(real))) {
+                throw new IllegalStateException("copia aprovada da midia do passo " + (passoIdx + 1) + " ausente ou alterada");
             }
+            arquivos.add(real);
+            nomes.add(midia.path("arquivo").asText(real.getFileName().toString()));
+            bytes += Files.size(real);
         }
         WebElement input = el(d, a.path("selector").asText());
         input.setFiles(arquivos.stream().map(java.nio.file.Path::toString).toList())
@@ -1749,12 +1731,12 @@ public class Tools {
         String falhaDriver = null;
         try {
             exec.apply(js);
-            long fim = System.currentTimeMillis() + REQUEST_TIMEOUT_MS;
-            while (System.currentTimeMillis() < fim) {
+            long fim = relogio.getAsLong() + REQUEST_TIMEOUT_MS;
+            while (relogio.getAsLong() < fim) {
                 Object o = exec.apply("(window[" + jsStr(key) + "]||'')");
                 raw = o == null ? "" : String.valueOf(o);
                 if (!raw.isBlank() && !"null".equals(raw)) break;
-                Thread.sleep(300);
+                pausa.dormir(300);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -1797,12 +1779,12 @@ public class Tools {
         out.put("status", status);
         // a resposta vai para o resultado, o lote executado e o journal: nunca com token/sessao
         out.put("bodySnippet", redigir(snippet));
+        if (status < 0) throw new IllegalStateException("request nao enviado: " + snippet);
         if (status == 0) {
             // fetch rejeitado (rede/CORS/abort): o pedido pode ter chegado ao servidor
             out.put("incerto", true);
             throw new IllegalStateException("request com resultado incerto: " + redigir(snippet));
         }
-        if (status < 0) throw new IllegalStateException("request nao enviado: " + snippet);
         if (!statusEsperado(a.path("expectStatus"), status)) {
             throw new IllegalStateException("request respondeu status " + status + " fora de expectStatus " + a.path("expectStatus"));
         }
@@ -1931,12 +1913,11 @@ public class Tools {
         StringBuilder out = new StringBuilder(s.length());
         int last = 0;
         int busca = 0;
-        while (busca < s.length()) {
-            if (!m.find(busca)) break;
+        while (m.find(busca)) {
             int inicioValor = m.end();
             if (inicioValor >= s.length()
                     || (s.charAt(inicioValor) != '{' && s.charAt(inicioValor) != '[')) {
-                busca = Math.max(inicioValor, m.start() + 1);
+                busca = inicioValor; // casamento tem >= 4 caracteres: sempre avanca
                 continue;
             }
             int fimValor = fimDaSubarvore(s, inicioValor);
@@ -2027,7 +2008,7 @@ public class Tools {
     /** exec = executeScript da aba (seam de teste). Falha do navegador aqui e antes de qualquer clique: NaoAgiu. */
     static boolean presente(java.util.function.Function<String, Object> exec, String selector) throws InterruptedException {
         String js = presencaScript(selector);
-        long fim = System.currentTimeMillis() + PRESENCA_TIMEOUT_MS;
+        long fim = relogio.getAsLong() + PRESENCA_TIMEOUT_MS;
         while (true) {
             String r;
             try {
@@ -2039,8 +2020,8 @@ public class Tools {
             if (!"0".equals(r)) {
                 throw new RealClick.NaoAgiu("ifPresent: nao deu para saber se '" + selector + "' existe (" + corta(r, 160) + ")");
             }
-            if (System.currentTimeMillis() >= fim) return false;
-            Thread.sleep(300);
+            if (relogio.getAsLong() >= fim) return false;
+            pausa.dormir(300);
         }
     }
 
@@ -2062,29 +2043,43 @@ public class Tools {
      */
     private static WebElement shadowEl(JavaDriverless d, List<String> parts, String selector) throws Exception {
         String js = ShadowDom.findScript(parts);
-        long fim = System.currentTimeMillis() + SHADOW_FIND_TIMEOUT_MS;
+        long fim = relogio.getAsLong() + SHADOW_FIND_TIMEOUT_MS;
         while (true) {
             io.github.selenium.javaDriverless.types.Target t = d.getChrome().getCurrentTarget()
                     .get((long) KEY_TIMEOUT_S, java.util.concurrent.TimeUnit.SECONDS);
             Object o = t.executeScript(js, null, true, "deep").get((long) KEY_TIMEOUT_S, java.util.concurrent.TimeUnit.SECONDS);
             if (o instanceof WebElement w) return w;
-            if (System.currentTimeMillis() >= fim) {
+            if (relogio.getAsLong() >= fim) {
                 throw new IllegalStateException("elemento nao encontrado no shadow DOM: '" + selector + "'");
             }
-            Thread.sleep(300);
+            pausa.dormir(300);
+        }
+    }
+
+    /** Pausas, sorteio e relogio de todos os passos: injetaveis em teste; em producao, Thread.sleep, Math.random e System.currentTimeMillis. */
+    static TypeText.Pausa pausa = Thread::sleep;
+    static java.util.function.LongSupplier relogio = System::currentTimeMillis;
+    static java.util.function.DoubleSupplier sorteio = Math::random;
+
+    /** Dorme como JavaDriverless.sleep: interrupcao nao propaga, so religa a flag. */
+    private static void dormir(long ms) {
+        try {
+            pausa.dormir(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
     private void sleepJitter(String network) {
-        JsonNode r = store.networkCfg(network).path("stepDelayMs");
-        long min = r.isArray() && r.size() == 2 ? r.get(0).asLong(1500) : 1500;
-        long max = r.isArray() && r.size() == 2 ? r.get(1).asLong(6000) : 6000;
-        long ms = min + (long) (Math.random() * Math.max(1, max - min));
-        try {
-            Thread.sleep(ms);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
+        dormir(jitterMs(store.networkCfg(network).path("stepDelayMs"), sorteio.getAsDouble()));
+    }
+
+    /** Espera entre passos: [min, max) de stepDelayMs (par valido) ou [1500, 6000). */
+    static long jitterMs(JsonNode r, double sorteio) {
+        boolean par = r.isArray() && r.size() == 2;
+        long min = par ? r.get(0).asLong(1500) : 1500;
+        long max = par ? r.get(1).asLong(6000) : 6000;
+        return min + (long) (sorteio * Math.max(1, max - min));
     }
 
     // ---------- helpers ----------

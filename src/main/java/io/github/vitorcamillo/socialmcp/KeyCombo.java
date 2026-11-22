@@ -83,7 +83,7 @@ public record KeyCombo(List<String> modifierNames, int modifiers, String key, St
         String code;
         int vk;
         String text;
-        Object[] named = last.length() > 1 ? NAMED.get(last.toLowerCase(Locale.ROOT)) : null;
+        Object[] named = NAMED.get(last.toLowerCase(Locale.ROOT));
         if (named != null) {
             key = (String) named[0];
             code = (String) named[1];

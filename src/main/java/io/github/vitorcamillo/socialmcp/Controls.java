@@ -139,7 +139,7 @@ return JSON.stringify({controls,count:controls.length,truncated:omitted>0});
             return "";
         }
         String t = s.replaceAll("\\s+", " ").trim();
-        return t.length() > TETO_STR ? t.substring(0, TETO_STR) : t;
+        return t.substring(0, Math.min(t.length(), TETO_STR));
     }
 
     /**

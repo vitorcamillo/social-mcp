@@ -310,29 +310,27 @@ public class Recipes {
     enum Ctx { URL, FORM, JSON, LITERAL, XPATH }
 
     static boolean dentroDeStringJson(String template, int ini) {
-        int campoIni = template.lastIndexOf('&', ini - 1) + 1;
-        int igual = template.indexOf('=', campoIni);
-        int valorIni = igual >= 0 && igual < ini ? igual + 1 : campoIni;
-        String valor = template.substring(valorIni, ini).trim();
+        String antes = template.substring(0, ini);
+        int campoIni = antes.lastIndexOf('&') + 1;
+        int igual = antes.indexOf('=', campoIni);
+        int valorIni = igual >= 0 ? igual + 1 : campoIni;
+        String valor = antes.substring(valorIni).trim();
         String lower = valor.toLowerCase(Locale.ROOT);
         if (!(valor.startsWith("{") || valor.startsWith("[") || lower.startsWith("%7b") || lower.startsWith("%5b"))) {
             return false;
         }
-
         int aspas = 0;
-        for (int i = valorIni; i < ini; i++) {
-            char c = template.charAt(i);
-            if (c == '"' && (i == 0 || template.charAt(i - 1) != '\\')) {
-                aspas++;
-            } else if (c == '%' && i + 2 < ini
-                    && template.regionMatches(true, i, "%22", 0, 3)) {
-                boolean escapada = i > 0 && template.charAt(i - 1) == '\\'
-                        || i >= 3 && template.regionMatches(true, i - 3, "%5C", 0, 3);
-                if (!escapada) aspas++;
+        for (int i = valorIni; i < antes.length(); i++) {
+            char c = antes.charAt(i);
+            if (c == '"' && !antes.startsWith("\\", i - 1)) {
+                aspas ^= 1;
+            } else if (c == '%' && antes.regionMatches(true, i, "%22", 0, 3)) {
+                boolean escapada = antes.startsWith("\\", i - 1) || antes.regionMatches(true, i - 3, "%5C", 0, 3);
+                if (!escapada) aspas ^= 1;
                 i += 2;
             }
         }
-        return (aspas & 1) == 1;
+        return aspas == 1;
     }
 
     static String expand(String template, JsonNode params, Ctx ctx) {

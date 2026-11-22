@@ -327,7 +327,9 @@ final class RealClick {
         List<double[]> out = new ArrayList<>();
         for (int i = 1; i <= n; i++) {
             double u = (double) i / n;
-            double e = u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
+            // ease-in-out quadratico sem desvio: 2u^2 ate a metade, 1 - 2(1-u)^2 depois
+            double s = Math.max(0, 2 * u - 1);
+            double e = 2 * u * u - s * s;
             double px = (1 - e) * (1 - e) * x0 + 2 * (1 - e) * e * cx + e * e * x1;
             double py = (1 - e) * (1 - e) * y0 + 2 * (1 - e) * e * cy + e * e * y1;
             out.add(new double[]{Math.max(0, px), Math.max(0, py)});
@@ -342,10 +344,13 @@ final class RealClick {
         if (de == null) de = new double[]{x - 120 - rnd.nextDouble() * 200, y + 60 + rnd.nextDouble() * 120};
         for (double[] pt : path(de[0], de[1], x, y, rnd)) {
             dispatch(t, "mouseMoved", pt[0], pt[1], "none", 0, 0);
-            Thread.sleep(8 + rnd.nextInt(18));
+            pausa.dormir(8 + rnd.nextInt(18));
         }
         LAST.put(t, new double[]{x, y});
     }
+
+    /** Pausa entre os pontos da trilha do mouse: injetavel em teste; em producao, Thread.sleep. */
+    static TypeText.Pausa pausa = Thread::sleep;
 
     static Map<String, Object> mouseEvent(String type, double x, double y, String button, int buttons, int clickCount) {
         Map<String, Object> p = new HashMap<>();

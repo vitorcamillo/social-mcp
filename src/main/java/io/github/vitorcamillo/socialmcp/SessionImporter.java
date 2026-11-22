@@ -8,6 +8,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * Importa cookies (JSON de exportacao) na sessao persistente de uma rede.
@@ -22,6 +24,11 @@ public final class SessionImporter {
             "cadastre-se", "sign up", "create account", "registrar-se", "criar conta"
     };
 
+    /** Ponto de injecao de teste: registro do gancho que fecha o pool ao sair (publico: Runtime real). */
+    static Consumer<Thread> ganchoSaida = Runtime.getRuntime()::addShutdownHook;
+    /** Ponto de injecao de teste: fabrica do pool (publico: BrowserPool real do Store). */
+    static Function<Store, BrowserPool> fabricaPool = BrowserPool::new;
+
     public static String run(Store store, String network, String arquivo) throws Exception {
         if (!store.knownNetworks().contains(network)) {
             throw new IllegalArgumentException("rede desconhecida: " + network);
@@ -30,8 +37,8 @@ public final class SessionImporter {
         if (!arr.isArray() || arr.isEmpty()) {
             throw new IllegalArgumentException("arquivo sem cookies: " + arquivo);
         }
-        BrowserPool pool = new BrowserPool(store);
-        Runtime.getRuntime().addShutdownHook(new Thread(pool::closeAll));
+        BrowserPool pool = fabricaPool.apply(store);
+        ganchoSaida.accept(new Thread(pool::closeAll));
         try {
             JavaDriverless d = pool.get(network);
             String start = store.networkCfg(network).path("startUrl").asText("https://www." + network + ".com/");
