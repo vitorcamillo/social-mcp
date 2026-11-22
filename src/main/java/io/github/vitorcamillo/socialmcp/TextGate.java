@@ -87,11 +87,16 @@ public final class TextGate {
 
     private static void copiar(InputStream in, ByteArrayOutputStream buf) {
         byte[] b = new byte[8192];
+        // segura o monitor do stream a copia inteira: quando o gate sai, o JDK (processExited,
+        // synchronized no mesmo stream) drena e FECHA o pipe se o leitor estiver entre dois read;
+        // a saida que um descendente ainda escreveria depois disso se perderia
         try (in) {
-            int n;
-            while ((n = in.read(b)) != -1) {
-                synchronized (buf) {
-                    buf.write(b, 0, n);
+            synchronized (in) {
+                int n;
+                while ((n = in.read(b)) != -1) {
+                    synchronized (buf) {
+                        buf.write(b, 0, n);
+                    }
                 }
             }
         } catch (IOException ignored) {

@@ -85,12 +85,15 @@ class TextGateMutantesTest {
     }
 
     @Test
-    void joinEsperaFilhoQueSeguraStdout() throws Exception {
-        Store s = storeComGate(tmp, "(sleep 0.3; printf FIM) & exit 0", 30, null);
+    void joinEsperaDescendenteQueSeguraStdout() throws Exception {
+        // 200 KB (> buffer de 64 KiB do pipe): o pai so termina de escrever com o leitor ja
+        // copiando, entao o leitor esta dentro da copia quando o pai sai e o neto escreve depois
+        Store s = storeComGate(tmp,
+                "head -c 200000 /dev/zero | tr '\\0' x; (sleep 0.3; printf FIM) & exit 0", 30, null);
         TextGate.Resultado r = TextGate.rodarPre(s, lote(s), List.of());
         assertEquals(0, r.exit());
         assertEquals("PASS", r.resultado());
-        assertEquals("FIM", r.saida());
+        assertEquals("x".repeat(200_000) + "FIM", r.saida());
     }
 
     @Test
