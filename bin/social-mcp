@@ -7,6 +7,13 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 JAR="$DIR/target/social-mcp-0.1.0.jar"
 
+# Sem SOCIAL_MCP_HOME no ambiente, vale a 1a linha de ~/.config/social-mcp/home (instalacao
+# local, fora do repositorio); sem esse arquivo, o padrao publico.
+_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/social-mcp/home"
+if [ -z "${SOCIAL_MCP_HOME:-}" ] && [ -r "$_cfg" ]; then
+  IFS= read -r SOCIAL_MCP_HOME < "$_cfg" || true
+fi
+unset _cfg
 export SOCIAL_MCP_HOME="${SOCIAL_MCP_HOME:-$HOME/.social-mcp-public}"
 export DISPLAY="${DISPLAY:-:0}"
 # DISPLAY herdado pode apontar para uma sessao X morta (ex.: :0 apos reboot/logoff).

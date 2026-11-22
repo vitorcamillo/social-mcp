@@ -36,7 +36,7 @@ mvn -B -ntp package
 ./bin/social-mcp --cli status
 ```
 
-Por padrão, o launcher armazena o estado em `~/.social-mcp-public`. Defina `SOCIAL_MCP_HOME` para um diretório isolado ao executar testes ou mais de uma instalação. O diretório contém configuração, entradas do journal, lotes, screenshots e perfis do navegador; nunca o compartilhe nem o versione.
+Por padrão, o launcher armazena o estado em `~/.social-mcp-public`. Defina `SOCIAL_MCP_HOME` para um diretório isolado ao executar testes ou mais de uma instalação. Para fixar o diretório de uma instalação sem editar o launcher, grave o caminho absoluto na primeira linha de `~/.config/social-mcp/home`; a variável de ambiente, quando definida, tem prioridade. O diretório contém configuração, entradas do journal, lotes, screenshots e perfis do navegador; nunca o compartilhe nem o versione.
 
 ## Configuração do gate
 
