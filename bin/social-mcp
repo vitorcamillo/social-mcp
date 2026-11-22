@@ -12,6 +12,12 @@ JAR="$DIR/target/social-mcp-0.1.0.jar"
 _cfg="${XDG_CONFIG_HOME:-$HOME/.config}/social-mcp/home"
 if [ -z "${SOCIAL_MCP_HOME:-}" ] && [ -r "$_cfg" ]; then
   IFS= read -r SOCIAL_MCP_HOME < "$_cfg" || true
+  SOCIAL_MCP_HOME="${SOCIAL_MCP_HOME%$'\r'}"
+  # caminho relativo dependeria do cwd (servidor e CLI de aprovacao veriam homes diferentes)
+  case "$SOCIAL_MCP_HOME" in
+    "" | /*) ;;
+    *) echo "social-mcp: $_cfg precisa conter caminho absoluto" >&2; exit 1 ;;
+  esac
 fi
 unset _cfg
 export SOCIAL_MCP_HOME="${SOCIAL_MCP_HOME:-$HOME/.social-mcp-public}"

@@ -532,23 +532,31 @@ public final class PublishTrace implements AutoCloseable {
 
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
-        RuntimeException failure = null;
-        for (Map.Entry<String, Consumer<JsonNode>> entry : new ArrayList<>(listeners.entrySet())) {
-            try {
-                await(cdp.removeCdpListener(entry.getKey(), entry.getValue()));
-            } catch (Exception e) {
-                markInvalid(e);
-                if (failure == null) failure = new IllegalStateException("Falha ao limpar listener CDP", e);
-                else failure.addSuppressed(e);
+        // limpeza completa mesmo com a thread interrompida (o get do future engoliria a flag e
+        // pularia a espera); a flag volta no fim para quem chamou
+        boolean interrompida = Thread.interrupted();
+        try {
+            RuntimeException failure = null;
+            for (Map.Entry<String, Consumer<JsonNode>> entry : new ArrayList<>(listeners.entrySet())) {
+                try {
+                    await(cdp.removeCdpListener(entry.getKey(), entry.getValue()));
+                } catch (Exception e) {
+                    if (e instanceof InterruptedException) interrompida = true;
+                    markInvalid(e);
+                    if (failure == null) failure = new IllegalStateException("Falha ao limpar listener CDP", e);
+                    else failure.addSuppressed(e);
+                }
             }
+            listeners.clear();
+            synchronized (this) {
+                requests.clear();
+                capturedIds.clear();
+            }
+            bodyExecutor.shutdownNow();
+            if (failure != null) throw failure;
+        } finally {
+            if (interrompida) Thread.currentThread().interrupt();
         }
-        listeners.clear();
-        synchronized (this) {
-            requests.clear();
-            capturedIds.clear();
-        }
-        bodyExecutor.shutdownNow();
-        if (failure != null) throw failure;
     }
 
     private static String normalizeNetwork(String network) {

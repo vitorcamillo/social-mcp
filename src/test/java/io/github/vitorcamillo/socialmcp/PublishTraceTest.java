@@ -34,6 +34,8 @@ class PublishTraceTest {
         volatile boolean failRemove;
         volatile boolean failBody;
         volatile boolean failPostData;
+        volatile boolean removeAtrasado;
+        volatile CompletableFuture<Void> removePendente;
 
         @Override public CompletableFuture<Void> addCdpListener(String event, Consumer<JsonNode> listener) {
             if (failAdd && event.equals("Network.responseReceived")) return failed();
@@ -45,6 +47,16 @@ class PublishTraceTest {
         @Override public CompletableFuture<Void> removeCdpListener(String event, Consumer<JsonNode> listener) {
             removed.add(event);
             listeners.remove(event, listener);
+            CompletableFuture<Void> pendente = removePendente;
+            if (pendente != null) {
+                // so o 1o listener fica pendurado; os demais limpam na hora
+                removePendente = null;
+                return pendente;
+            }
+            if (removeAtrasado) {
+                // future ainda pendente quando o close espera: e ai que o get olha a interrupcao
+                return CompletableFuture.runAsync(() -> {}, CompletableFuture.delayedExecutor(30, TimeUnit.MILLISECONDS));
+            }
             return failRemove ? failed() : completed();
         }
 
@@ -215,6 +227,51 @@ class PublishTraceTest {
         now.set(1_200_010);
         assertThrows(IllegalStateException.class, () -> ttl.assertMatched("x"));
         ttl.close();
+    }
+
+    @Test
+    void closeInterrompidoLimpaTodosListenersEPreservaFlag() {
+        FakeCdp cdp = new FakeCdp();
+        PublishTrace trace = start(cdp);
+        cdp.removeAtrasado = true;
+        Thread.currentThread().interrupt();
+        boolean preservou;
+        try {
+            trace.close();
+        } finally {
+            preservou = Thread.interrupted();
+        }
+        assertTrue(preservou, "close nao pode engolir a flag de interrupcao");
+        assertEquals(3, cdp.removed.size());
+        assertTrue(cdp.listeners.isEmpty());
+    }
+
+    @Test
+    void interrupcaoDuranteCloseVoltaParaQuemChamou() throws Exception {
+        FakeCdp cdp = new FakeCdp();
+        PublishTrace trace = start(cdp);
+        cdp.removePendente = new CompletableFuture<>();
+        Object[] fim = new Object[2];
+        Thread t = new Thread(() -> {
+            try {
+                trace.close();
+                fim[0] = "close retornou sem falha";
+            } catch (Throwable e) {
+                fim[0] = e;
+            }
+            fim[1] = Thread.currentThread().isInterrupted();
+        });
+        t.start();
+        // so interrompe com a thread parada no get do 1o listener (unico ponto que espera no close)
+        for (int i = 0; i < 200 && t.getState() != Thread.State.TIMED_WAITING; i++) Thread.sleep(10);
+        assertEquals(Thread.State.TIMED_WAITING, t.getState());
+        t.interrupt();
+        t.join(2_000);
+        assertFalse(t.isAlive());
+        // o listener cuja espera foi interrompida conta como falha de limpeza
+        assertInstanceOf(IllegalStateException.class, fim[0]);
+        assertEquals(3, cdp.removed.size());
+        assertEquals(true, fim[1], "interrupcao no meio do close deveria voltar para quem chamou");
     }
 
     @Test

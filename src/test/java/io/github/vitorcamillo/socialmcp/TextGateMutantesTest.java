@@ -111,6 +111,35 @@ class TextGateMutantesTest {
     }
 
     @Test
+    void interrupcaoNoMeioMataDescendentes() throws Exception {
+        Path pidFile = tmp.resolve("neto.pid");
+        Store s = storeComGate(tmp, "sleep 15 & echo $! > '" + pidFile.toAbsolutePath() + "'; wait", 30, null);
+        Path l = lote(s);
+        TextGate.Resultado[] r = new TextGate.Resultado[1];
+        boolean[] flag = new boolean[1];
+        Thread t = new Thread(() -> {
+            r[0] = TextGate.rodarPre(s, l, List.of());
+            flag[0] = Thread.currentThread().isInterrupted();
+        });
+        t.start();
+        for (int i = 0; i < 100 && !(Files.exists(pidFile) && Files.readString(pidFile).endsWith("\n")); i++) {
+            Thread.sleep(50);
+        }
+        long pid = Long.parseLong(Files.readString(pidFile, StandardCharsets.UTF_8).trim());
+        t.interrupt();
+        t.join(5_000);
+        assertEquals("gate interrompido", r[0].saida());
+        assertTrue(flag[0], "flag de interrupcao deveria ser preservada");
+        boolean morto = false;
+        for (int i = 0; i < 20 && !morto; i++) {
+            morto = ProcessHandle.of(pid).map(h -> !h.isAlive()).orElse(true);
+            if (!morto) Thread.sleep(50);
+        }
+        ProcessHandle.of(pid).ifPresent(ProcessHandle::destroyForcibly);
+        assertTrue(morto, "descendente do gate interrompido nao pode ficar orfao");
+    }
+
+    @Test
     void interrupcaoPreservaFlagERetornaErro() throws Exception {
         String marca = "gate-interrompido-" + System.nanoTime();
         Store s = storeComGate(tmp, "sleep 7; : " + marca, 30, null);
