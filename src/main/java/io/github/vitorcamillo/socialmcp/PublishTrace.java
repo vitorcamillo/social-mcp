@@ -55,6 +55,14 @@ public final class PublishTrace implements AutoCloseable {
         }
     }
 
+    private static final String REDDIT_COMMENT_PATH = "^/svc/shreddit/t[13]_[a-z0-9]{1,16}/create-comment$";
+
+    /** Envio de post novo do Reddit: GraphQL do shreddit, rota de submit do shreddit ou /api/submit (nunca /events). */
+    static boolean redditPostPath(String path) {
+        return path.equals("/svc/shreddit/graphql") || path.equals("/api/submit")
+                || path.matches("^/svc/shreddit/(?:[a-z0-9_-]+/){0,3}(?:submit|create-post)[a-z0-9_-]*/?$");
+    }
+
     private static final class RequestState {
         private int status;
         private boolean finished;
@@ -321,8 +329,11 @@ public final class PublishTrace implements AutoCloseable {
                 // Resposta HTML do create-comment: o fragmento do comentario novo traz o id como t1_<id>
                 // (atributo thingid, permalink ou JSON embutido; aspas podem vir escapadas). So ids deste
                 // endpoint entram; o verify_new_id ainda exige autor da conta e id ausente da captura.
+                // Criacao de post (graphql/submit, so com o titulo/texto aprovado no corpo): ids t3_<id>.
                 java.util.Set<String> occurrences = new java.util.LinkedHashSet<>();
-                var shreddit = java.util.regex.Pattern.compile("(?<![A-Za-z0-9_])t1_([a-z0-9]{1,16})(?![a-z0-9])").matcher(body);
+                boolean comentario = state.path == null || state.path.matches(REDDIT_COMMENT_PATH);
+                var shreddit = java.util.regex.Pattern.compile("(?<![A-Za-z0-9_])" + (comentario ? "t1_" : "t3_")
+                        + "([a-z0-9]{1,16})(?![a-z0-9])").matcher(body);
                 while (shreddit.find()) occurrences.add(shreddit.group(1));
                 synchronized (this) {
                     if (expiredOrInvalid()) return;
@@ -488,7 +499,7 @@ public final class PublishTrace implements AutoCloseable {
             case "mastodon" -> host.equals("mastodon.social") && path.equals("/api/v1/statuses");
             case "x" -> path.matches("^/i/api/graphql/[A-Za-z0-9_-]+/CreateTweet$");
             case "pinterest" -> path.equals("/resource/PinResource/create/");
-            case "reddit" -> path.matches("^/svc/shreddit/t[13]_[a-z0-9]{1,16}/create-comment$");
+            case "reddit" -> path.matches(REDDIT_COMMENT_PATH) || redditPostPath(path);
             default -> true;
         };
     }

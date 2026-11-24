@@ -669,6 +669,31 @@ class PublishTraceTest {
     }
 
     @Test
+    void capturaPostNovoRedditPeloGraphqlSoT3() throws Exception {
+        FakeCdp cdp = new FakeCdp();
+        cdp.response = Json.obj().put("body",
+                "{\"data\":{\"createPost\":{\"ok\":true,\"post\":{\"id\":\"t3_1y2abcd\"},\"sub\":\"t5_mbc2e\",\"c\":\"t1_naoconta\"}}}")
+                .put("base64Encoded", false);
+        PublishTrace trace = PublishTrace.start(cdp, "reddit", TEXT);
+        cdp.publicationRequest("g", "https://www.reddit.com/svc/shreddit/graphql", "POST",
+                Json.write(Json.obj().put("operation", "CreatePost").put("title", TEXT)));
+        cdp.response("g", 200);
+        assertTrue(cdp.awaitBody());
+        waitForId(trace, "1y2abcd");
+        assertEquals(Set.of("1y2abcd"), trace.ids());
+        trace.close();
+    }
+
+    @Test
+    void rotasDePostNovoDoReddit() {
+        assertTrue(PublishTrace.redditPostPath("/svc/shreddit/graphql"));
+        assertTrue(PublishTrace.redditPostPath("/api/submit"));
+        assertTrue(PublishTrace.redditPostPath("/svc/shreddit/r/gtabrasil/submit"));
+        assertFalse(PublishTrace.redditPostPath("/svc/shreddit/events"));
+        assertFalse(PublishTrace.redditPostPath("/svc/shreddit/graphql/x"));
+    }
+
+    @Test
     void capturaComentarioRedditComAtributoComplexoEAspasEscapadas() throws Exception {
         FakeCdp cdp = new FakeCdp();
         cdp.response = Json.obj().put("body",
