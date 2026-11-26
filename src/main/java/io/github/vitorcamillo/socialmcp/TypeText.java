@@ -11,6 +11,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 
 /**
  * Digitacao do passo {@code type}.
@@ -134,10 +135,15 @@ final class TypeText {
 
     /** Digita com teclas nativas do CDP (ver {@code keys(Cdp, String, Random)}). */
     static int keys(JavaDriverless d, String text, Random rnd) throws Exception {
+        return keys(d, text, rnd, System::currentTimeMillis, Long.MAX_VALUE);
+    }
+
+    /** Como {@link #keys(JavaDriverless, String, Random)}, abortando no prazo. */
+    static int keys(JavaDriverless d, String text, Random rnd, LongSupplier relogio, long prazoFimMs) throws Exception {
         io.github.selenium.javaDriverless.types.Target t = d.getChrome().getCurrentTarget()
                 .get(CDP_TIMEOUT_S, TimeUnit.SECONDS);
         return keys((method, params) -> t.executeCdpCmd(method, params, (float) CDP_TIMEOUT_S)
-                .get(CDP_TIMEOUT_S + 2, TimeUnit.SECONDS), text, rnd);
+                .get(CDP_TIMEOUT_S + 2, TimeUnit.SECONDS), text, rnd, relogio, prazoFimMs);
     }
 
     /**
@@ -148,6 +154,15 @@ final class TypeText {
      * {@code Input.insertText}. Devolve quantos grafemas foram enviados como tecla.
      */
     static int keys(Cdp cdp, String text, Random rnd) throws Exception {
+        return keys(cdp, text, rnd, System::currentTimeMillis, Long.MAX_VALUE);
+    }
+
+    /**
+     * Como {@link #keys(Cdp, String, Random)}, checando o prazo antes de cada grafema:
+     * ao esgotar, lanca falha conservadora (o passo erra e o lote registra) em vez de o
+     * cliente cortar a chamada no meio e o resultado do lote se perder.
+     */
+    static int keys(Cdp cdp, String text, Random rnd, LongSupplier relogio, long prazoFimMs) throws Exception {
         if (text == null || text.isEmpty()) return 0;
         String t = text.replace("\r\n", "\n").replace('\r', '\n');
         BreakIterator it = BreakIterator.getCharacterInstance(Locale.ROOT);
@@ -158,6 +173,10 @@ final class TypeText {
         }
         int teclas = 0;
         for (int i = 0; i < grafemas.size(); i++) {
+            if (relogio.getAsLong() >= prazoFimMs) {
+                throw new IllegalStateException("type: prazo esgotado na digitacao por teclas (grafema "
+                        + (i + 1) + " de " + grafemas.size() + "); confira o campo, o texto pode estar parcial");
+            }
             String g = grafemas.get(i);
             if (g.equals("\n")) {
                 cdp.cmd("Input.insertText", params("text", "\n"));
@@ -168,11 +187,22 @@ final class TypeText {
                 if (k.shift()) {
                     cdp.cmd("Input.dispatchKeyEvent", keyEvent("rawKeyDown", "Shift", "ShiftLeft", 16, null, 8));
                 }
-                cdp.cmd("Input.dispatchKeyEvent", keyEvent("keyDown", g, k.code(), k.vk(), g, modifiers));
-                pausa.dormir(45 + rnd.nextInt(75));
-                cdp.cmd("Input.dispatchKeyEvent", keyEvent("keyUp", g, k.code(), k.vk(), null, modifiers));
-                if (k.shift()) {
-                    cdp.cmd("Input.dispatchKeyEvent", keyEvent("keyUp", "Shift", "ShiftLeft", 16, null, 0));
+                try {
+                    cdp.cmd("Input.dispatchKeyEvent", keyEvent("keyDown", g, k.code(), k.vk(), g, modifiers));
+                    pausa.dormir(45 + rnd.nextInt(75));
+                } finally {
+                    try {
+                        cdp.cmd("Input.dispatchKeyEvent", keyEvent("keyUp", g, k.code(), k.vk(), null, modifiers));
+                    } catch (Exception ignore) {
+                        // melhor esforco: nao deixar a tecla presa
+                    }
+                    if (k.shift()) {
+                        try {
+                            cdp.cmd("Input.dispatchKeyEvent", keyEvent("keyUp", "Shift", "ShiftLeft", 16, null, 0));
+                        } catch (Exception ignore) {
+                            // melhor esforco: nao deixar o Shift preso
+                        }
+                    }
                 }
                 teclas++;
             } else {
@@ -186,6 +216,29 @@ final class TypeText {
             }
         }
         return teclas;
+    }
+
+    /** Grafemas do texto normalizado (quebras viram {@code \n}), como o {@code keys} digita. */
+    static int grafemas(String text) {
+        if (text == null || text.isEmpty()) return 0;
+        String t = text.replace("\r\n", "\n").replace('\r', '\n');
+        BreakIterator it = BreakIterator.getCharacterInstance(Locale.ROOT);
+        it.setText(t);
+        int n = 0;
+        while (it.next() != BreakIterator.DONE) n++;
+        return n;
+    }
+
+    /** Duracao esperada (ms) por teclas: ~210 ms/grafema (segurada media 82, pausa media 105, extra media 21). */
+    static long duracaoEsperadaMs(String text) {
+        return grafemas(text) * 210L;
+    }
+
+    /** Duracao esperada (ms) por insertText: pedacos de 4,5 grafemas em media, pausa media da faixa. */
+    static long duracaoEsperadaInsertMs(String text, long[] delayMs) {
+        int n = grafemas(text);
+        if (n == 0) return 0;
+        return (long) Math.ceil(n / 4.5) * (delayMs[0] + delayMs[1]) / 2;
     }
 
     private record Tecla(String code, int vk, boolean shift) {}

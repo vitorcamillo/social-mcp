@@ -1,0 +1,1 @@
+- 10878a3: sobe o javadriveless de 1.12.3 para 2.0.1 no pom.xml (versao maior); a mensagem so registra a mudanca em navigator.webdriver e outros comportamentos padrao eventualmente alterados na 2.0 nao foram auditados

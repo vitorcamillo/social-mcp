@@ -1324,7 +1324,20 @@ public class Tools {
                 String modo = TypeText.mode(cfg);
                 out.put("modo", modo);
                 if (TypeText.MODE_KEYS.equals(modo)) {
-                    int teclas = TypeText.keys(d, text, new java.util.Random());
+                    long restaMs = prazoFimMs - relogio.getAsLong();
+                    if (restaMs > 0 && TypeText.duracaoEsperadaMs(text) > restaMs) {
+                        long[] delay = TypeText.chunkDelay(cfg);
+                        if (TypeText.duracaoEsperadaInsertMs(text, delay) > restaMs) {
+                            throw new IllegalStateException("type: texto de " + text.length()
+                                    + " caracteres nao cabe no prazo restante (" + restaMs
+                                    + " ms) nem por teclas nem por insertText; nada foi digitado");
+                        }
+                        int pedacos = TypeText.insert(d, text, delay, new java.util.Random());
+                        out.put("modo", TypeText.MODE_INSERT);
+                        return "digitou " + text.length() + " caracteres (insertText, " + pedacos
+                                + " pedacos; teclas excedia o prazo restante)";
+                    }
+                    int teclas = TypeText.keys(d, text, new java.util.Random(), relogio, prazoFimMs);
                     return "digitou " + text.length() + " caracteres (teclas nativas, " + teclas + " por tecla)";
                 }
                 if (TypeText.MODE_KEYBOARD.equals(modo)) {
