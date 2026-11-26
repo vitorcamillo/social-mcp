@@ -1323,6 +1323,10 @@ public class Tools {
                 ObjectNode cfg = store.networkCfg(network);
                 String modo = TypeText.mode(cfg);
                 out.put("modo", modo);
+                if (TypeText.MODE_KEYS.equals(modo)) {
+                    int teclas = TypeText.keys(d, text, new java.util.Random());
+                    return "digitou " + text.length() + " caracteres (teclas nativas, " + teclas + " por tecla)";
+                }
                 if (TypeText.MODE_KEYBOARD.equals(modo)) {
                     d.getKeyboard().typeHumanized(text).get();
                     return "digitou " + text.length() + " caracteres (teclado humanizado)";

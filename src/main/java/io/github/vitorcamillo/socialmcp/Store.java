@@ -542,7 +542,7 @@ public class Store {
                 "maxBatchesPerDay": 4,
                 "maxPublicStepsPerBatch": 5,
                 "stepDelayMs": [1500, 6000],
-                "typeMode": "insertText",
+                "typeMode": "teclas",
                 "typeChunkDelayMs": [60, 260],
                 "pageTextMaxChars": 12000,
                 "uploadMaxMb": 200,

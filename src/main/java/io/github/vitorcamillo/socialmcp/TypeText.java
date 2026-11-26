@@ -5,6 +5,7 @@ import io.github.selenium.javaDriverless.JavaDriverless;
 
 import java.text.BreakIterator;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -14,7 +15,13 @@ import java.util.concurrent.TimeUnit;
 /**
  * Digitacao do passo {@code type}.
  *
- * <p>Modo padrao {@code insertText}: o texto vai por CDP {@code Input.insertText} em
+ * <p>Modo padrao {@code teclas}: cada grafema ASCII com mapa vira eventos nativos de
+ * tecla via CDP {@code Input.dispatchKeyEvent} com o campo {@code text} (como o
+ * Puppeteer), inserindo o caractere pelo caminho normal do navegador (keydown,
+ * keypress, beforeinput, input, keyup) e funcionando em contenteditable. Grafemas
+ * acentuados, emoji e quebra de linha continuam por {@code Input.insertText}.
+ *
+ * <p>Modo {@code insertText}: o texto vai por CDP {@code Input.insertText} em
  * pedacos de 1-8 grafemas, com pausa aleatoria entre pedacos. Motivo: o teclado da
  * javadriveless manda o espaco como keyDown/keyUp sem o campo {@code text} do CDP e,
  * em contenteditable (Bluesky, Facebook Lexical, X Draft.js, YouTube), o espaco nao
@@ -30,6 +37,7 @@ import java.util.concurrent.TimeUnit;
  */
 final class TypeText {
 
+    static final String MODE_KEYS = "teclas";
     static final String MODE_INSERT = "insertText";
     static final String MODE_KEYBOARD = "keyboard";
     static final int MAX_CHUNK = 8;
@@ -40,10 +48,15 @@ final class TypeText {
     private TypeText() {
     }
 
-    /** Modo de digitacao da rede: "keyboard" so se configurado; qualquer outro valor = insertText. */
+    /**
+     * Modo de digitacao da rede: {@code keyboard} e {@code insertText} so quando
+     * configurados; vazio, nulo, desconhecido e {@code teclas} caem em {@link #MODE_KEYS}.
+     */
     static String mode(JsonNode cfg) {
-        String m = cfg == null ? "" : cfg.path("typeMode").asText("");
-        return MODE_KEYBOARD.equalsIgnoreCase(m.trim()) ? MODE_KEYBOARD : MODE_INSERT;
+        String m = cfg == null ? "" : cfg.path("typeMode").asText("").trim();
+        if (MODE_KEYBOARD.equalsIgnoreCase(m)) return MODE_KEYBOARD;
+        if (MODE_INSERT.equalsIgnoreCase(m)) return MODE_INSERT;
+        return MODE_KEYS;
     }
 
     /** Faixa [min, max] de pausa entre pedacos; invalida cai no padrao. */
@@ -115,5 +128,101 @@ final class TypeText {
             }
         }
         return parts.size();
+    }
+
+    interface Cdp { void cmd(String method, Map<String, Object> params) throws Exception; }
+
+    /** Digita com teclas nativas do CDP (ver {@code keys(Cdp, String, Random)}). */
+    static int keys(JavaDriverless d, String text, Random rnd) throws Exception {
+        io.github.selenium.javaDriverless.types.Target t = d.getChrome().getCurrentTarget()
+                .get(CDP_TIMEOUT_S, TimeUnit.SECONDS);
+        return keys((method, params) -> t.executeCdpCmd(method, params, (float) CDP_TIMEOUT_S)
+                .get(CDP_TIMEOUT_S + 2, TimeUnit.SECONDS), text, rnd);
+    }
+
+    /**
+     * Digita por eventos nativos de tecla com {@code text} (como o Puppeteer), que
+     * inserem o caractere pelo caminho normal do navegador e funcionam em contenteditable.
+     * Cada grafema ASCII com mapa vira keyDown/keyUp (com Shift quando preciso) e conta
+     * uma tecla; acentos, emoji, pontuacao sem mapa e {@code \n} (nunca Enter) saem por
+     * {@code Input.insertText}. Devolve quantos grafemas foram enviados como tecla.
+     */
+    static int keys(Cdp cdp, String text, Random rnd) throws Exception {
+        if (text == null || text.isEmpty()) return 0;
+        String t = text.replace("\r\n", "\n").replace('\r', '\n');
+        BreakIterator it = BreakIterator.getCharacterInstance(Locale.ROOT);
+        it.setText(t);
+        List<String> grafemas = new ArrayList<>();
+        for (int start = it.first(), end = it.next(); end != BreakIterator.DONE; start = end, end = it.next()) {
+            grafemas.add(t.substring(start, end));
+        }
+        int teclas = 0;
+        for (int i = 0; i < grafemas.size(); i++) {
+            String g = grafemas.get(i);
+            if (g.equals("\n")) {
+                cdp.cmd("Input.insertText", params("text", "\n"));
+            } else if (g.length() == 1 && tecla(g.charAt(0)) != null) {
+                char c = g.charAt(0);
+                Tecla k = tecla(c);
+                int modifiers = k.shift() ? 8 : 0;
+                if (k.shift()) {
+                    cdp.cmd("Input.dispatchKeyEvent", keyEvent("rawKeyDown", "Shift", "ShiftLeft", 16, null, 8));
+                }
+                cdp.cmd("Input.dispatchKeyEvent", keyEvent("keyDown", g, k.code(), k.vk(), g, modifiers));
+                pausa.dormir(45 + rnd.nextInt(75));
+                cdp.cmd("Input.dispatchKeyEvent", keyEvent("keyUp", g, k.code(), k.vk(), null, modifiers));
+                if (k.shift()) {
+                    cdp.cmd("Input.dispatchKeyEvent", keyEvent("keyUp", "Shift", "ShiftLeft", 16, null, 0));
+                }
+                teclas++;
+            } else {
+                cdp.cmd("Input.insertText", params("text", g));
+            }
+            if (i < grafemas.size() - 1) {
+                pausa.dormir(60 + rnd.nextInt(90));
+                if (rnd.nextDouble() < 0.08) {
+                    pausa.dormir(150 + rnd.nextInt(220));
+                }
+            }
+        }
+        return teclas;
+    }
+
+    private record Tecla(String code, int vk, boolean shift) {}
+
+    /** Mapa de um caractere para a tecla nativa; null quando nao ha mapeamento. */
+    static Tecla tecla(char c) {
+        if (c >= 'a' && c <= 'z') return new Tecla("Key" + Character.toUpperCase(c), Character.toUpperCase(c), false);
+        if (c >= 'A' && c <= 'Z') return new Tecla("Key" + c, c, true);
+        if (c >= '0' && c <= '9') return new Tecla("Digit" + c, c, false);
+        return switch (c) {
+            case ' ' -> new Tecla("Space", 32, false);
+            case '.' -> new Tecla("Period", 190, false);
+            case ',' -> new Tecla("Comma", 188, false);
+            case '-' -> new Tecla("Minus", 189, false);
+            case '!' -> new Tecla("Digit1", 49, true);
+            case '?' -> new Tecla("Slash", 191, true);
+            default -> null;
+        };
+    }
+
+    private static Map<String, Object> params(Object... kv) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        for (int i = 0; i < kv.length; i += 2) m.put((String) kv[i], kv[i + 1]);
+        return m;
+    }
+
+    private static Map<String, Object> keyEvent(String type, String key, String code, int vk, String text, int modifiers) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("type", type);
+        m.put("key", key);
+        m.put("code", code);
+        m.put("windowsVirtualKeyCode", vk);
+        if (text != null) {
+            m.put("text", text);
+            m.put("unmodifiedText", text);
+        }
+        m.put("modifiers", modifiers);
+        return m;
     }
 }
