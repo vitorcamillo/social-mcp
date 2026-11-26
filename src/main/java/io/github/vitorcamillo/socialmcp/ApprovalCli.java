@@ -2,6 +2,7 @@ package io.github.vitorcamillo.socialmcp;
 
 import java.io.Console;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -63,6 +64,25 @@ public final class ApprovalCli {
     }
 
     static Importador importador = SessionImporter::run;
+
+    /** Ponto de injecao para teste; o padrao abre o Chrome visivel do perfil e espera fechar. */
+    interface Navegador {
+        void abrir(Path perfil, String url) throws Exception;
+    }
+
+    static Navegador navegador = ApprovalCli::abrirChromeVisivel;
+
+    /** Abre o Chrome do perfil e bloqueia ate o dono fechar (sem flags de automacao). */
+    static void abrirChromeVisivel(Path perfil, String url) throws Exception {
+        // mesma cifra do Chrome do MCP (lib usa --password-store=basic): sem ela os cookies saem
+        // cifrados pelo chaveiro (v11), o MCP nao decifra e a rede abre deslogada (FB/Reddit 26/11)
+        List<String> comando = new ArrayList<>(List.of(
+                "google-chrome", "--user-data-dir=" + perfil, "--password-store=basic"));
+        if (url != null && !url.isEmpty()) {
+            comando.add(url);
+        }
+        new ProcessBuilder(comando).inheritIO().start().waitFor();
+    }
 
     public static void run(String[] args) {
         int c = principal(args, homePadrao.get());
@@ -194,6 +214,34 @@ public final class ApprovalCli {
                     List<String> lines = store.tail(n);
                     System.out.println(lines.isEmpty() ? "(journal vazio)" : String.join("\n", lines));
                 }
+                case "sessao" -> {
+                    if (args.length >= 2) {
+                        System.out.println(SessionCheck.verificar(store, args[1]));
+                    } else {
+                        System.out.print(SessionCheck.relatorio(store));
+                    }
+                }
+                case "login" -> {
+                    if (args.length < 2) {
+                        System.out.println("uso: login <rede>");
+                        return 1;
+                    }
+                    String rede = args[1];
+                    if (!store.knownNetworks().contains(rede)) {
+                        System.out.println("rede desconhecida: " + rede);
+                        return 1;
+                    }
+                    Path perfil = store.profilesDir().resolve("sdk-" + rede);
+                    if (SessionCheck.perfilAberto(perfil)) {
+                        System.out.println("perfil de " + rede + " ja esta aberto: feche o Chrome e rode de novo");
+                        return 1;
+                    }
+                    String startUrl = store.networkCfg(rede).path("startUrl").asText("");
+                    System.out.println("Abrindo o Chrome do perfil de " + rede
+                            + ". Entre na conta da marca e FECHE o Chrome para terminar.");
+                    navegador.abrir(perfil, startUrl);
+                    System.out.println(SessionCheck.verificar(store, rede));
+                }
                 default -> uso();
             }
             return 0;
@@ -303,6 +351,8 @@ public final class ApprovalCli {
                                                              reativar rede (healthy) so pelo dono num terminal
                                                              interativo (CONFIRMO); pausar segue aberto
                   stop on|off                                kill-switch global
+                  sessao [rede]                              quais redes estao logadas (so nome/validade dos cookies; nunca o valor)
+                  login <rede>                               abre o Chrome do perfil da rede para o dono logar; ao fechar, confere a sessao
                   journal [n]                                ultimos n eventos
                   validar-receitas [rede]                    expande cada acao das receitas com params de exemplo
                                                              e roda a validacao do lote SEM gravar nada (nao gasta
