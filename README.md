@@ -70,6 +70,8 @@ CLI do aprovador (`bin/social-mcp --cli <comando>`):
 | `import-cookies` | Importa um arquivo JSON de cookies para a sessão persistente de uma rede. |
 | `validar-receitas` | Valida as receitas com parâmetros de exemplo sem gravar nada e sem gastar cota. |
 | `journal` | Mostra os últimos eventos do journal. |
+| `sessao` | Mostra quais redes estão logadas, por nome e validade dos cookies (nunca o valor); com `<rede>`, verifica só aquela. |
+| `login` | Abre o Chrome do perfil da rede, pelo mesmo proxy configurado, para o dono entrar na conta; ao fechar o Chrome, verifica a sessão. |
 
 Ferramentas MCP (transporte JSON-RPC por stdio):
 

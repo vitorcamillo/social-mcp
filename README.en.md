@@ -70,6 +70,8 @@ Approver CLI (`bin/social-mcp --cli <command>`):
 | `import-cookies` | Imports a JSON cookie file into a network's persistent session. |
 | `validar-receitas` | Validates recipes with example parameters without writing anything and without spending quota. |
 | `journal` | Shows the latest journal events. |
+| `sessao` | Shows which networks are logged in, by cookie name and expiry (never the value); with `<network>`, checks only that one. |
+| `login` | Opens the Chrome of the network profile, through the same configured proxy, so the owner can sign in; when Chrome is closed, it checks the session. |
 
 MCP tools (JSON-RPC over stdio):
 
