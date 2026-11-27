@@ -102,6 +102,57 @@ class SessionCheckTest {
     }
 
     @Test
+    void socialStatusExpoeSessaoPorRedeInclusiveCookieV11() throws Exception {
+        perfilComCookies("facebook");
+        perfilComCookies("instagram");
+        SessionCheck.leitor = arquivo -> {
+            if (arquivo.toString().contains("sdk-facebook")) {
+                return List.of(
+                        new SessionCheck.Cookie(".facebook.com", "c_user", micros(LocalDate.of(2027, 11, 26)), "v11"),
+                        new SessionCheck.Cookie(".facebook.com", "xs", micros(LocalDate.of(2028, 5, 1)), "v10"));
+            }
+            if (arquivo.toString().contains("sdk-instagram")) {
+                return List.of(
+                        cookie(".instagram.com", "sessionid", null),
+                        cookie(".instagram.com", "ds_user_id", null));
+            }
+            return List.of();
+        };
+        Tools tools = new Tools(store);
+        try {
+            var out = Json.parse(tools.call("social_status", Json.obj()));
+            var redes = out.path("redes");
+            assertEquals("deslogado para o MCP (cookies cifrados pelo chaveiro: relogue com --cli login facebook)",
+                    redes.path("facebook").path("sessao").asText());
+            assertEquals("logado (cookie de sessao)", redes.path("instagram").path("sessao").asText());
+            for (String rede : store.knownNetworks()) {
+                assertTrue(redes.path(rede).has("sessao"), "social_status sem sessao para " + rede);
+            }
+        } finally {
+            tools.shutdown();
+        }
+    }
+
+    @Test
+    void socialStatusDescriptionOrientaPararSeSessaoDeslogada() {
+        Tools tools = new Tools(store);
+        try {
+            String descricao = null;
+            for (var def : tools.definitions()) {
+                if ("social_status".equals(def.path("name").asText(""))) {
+                    descricao = def.path("description").asText("");
+                }
+            }
+            assertNotNull(descricao, "definitions sem social_status");
+            assertTrue(descricao.contains(
+                    "Se sessao comecar com 'deslogado', NAO navegue logado nessa rede: pare e avise o dono para rodar --cli login <rede>."),
+                    descricao);
+        } finally {
+            tools.shutdown();
+        }
+    }
+
+    @Test
     void cookiesDeSessaoLogadoSemData() throws Exception {
         perfilComCookies("instagram");
         SessionCheck.leitor = arquivo -> List.of(
