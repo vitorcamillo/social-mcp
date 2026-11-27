@@ -16,6 +16,8 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
@@ -372,6 +374,41 @@ class SessionCheckTest {
         assertTrue(Files.isSymbolicLink(link), "link nao e seguido nem apagado");
         assertTrue(Files.exists(alvoDoLink.resolve("f")), "alvo do link intacto");
         SessionCheck.limparSobras(base.resolve("nao-existe"), agora); // base ausente nao lanca
+    }
+
+    @Test
+    void limparSobrasConcorrenteNaMesmaSobraNaoLanca() throws Exception {
+        Path base = Files.createDirectories(tmp.resolve("tmpbase-concorrente"));
+        Instant agora = Instant.now();
+        for (int rodada = 0; rodada < 5; rodada++) {
+            Path velha = Files.createDirectories(base.resolve(SessionCheck.PREFIXO_TMP + "corrida"));
+            for (int i = 0; i < 100; i++) {
+                Path sub = Files.createDirectories(velha.resolve("sub" + i));
+                Files.writeString(sub.resolve("Cookies"), "x");
+            }
+            Files.setLastModifiedTime(velha, java.nio.file.attribute.FileTime.from(agora.minus(11, ChronoUnit.MINUTES)));
+            CountDownLatch largada = new CountDownLatch(1);
+            ConcurrentLinkedQueue<Throwable> erros = new ConcurrentLinkedQueue<>();
+            Runnable tarefa = () -> {
+                try {
+                    largada.await();
+                    SessionCheck.limparSobras(base, agora);
+                } catch (Throwable t) {
+                    erros.add(t);
+                }
+            };
+            Thread t1 = new Thread(tarefa);
+            Thread t2 = new Thread(tarefa);
+            t1.start();
+            t2.start();
+            largada.countDown();
+            t1.join(TimeUnit.SECONDS.toMillis(30));
+            t2.join(TimeUnit.SECONDS.toMillis(30));
+            assertFalse(t1.isAlive(), "limpeza concorrente deve terminar");
+            assertFalse(t2.isAlive(), "limpeza concorrente deve terminar");
+            assertTrue(erros.isEmpty(), () -> "limpeza concorrente nao deve lancar: " + erros);
+            assertFalse(Files.exists(velha), "sobra velha deve sumir mesmo com limpeza concorrente");
+        }
     }
 
     private static Set<String> temporariosSessao() throws Exception {

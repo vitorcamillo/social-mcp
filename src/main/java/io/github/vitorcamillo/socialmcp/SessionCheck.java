@@ -1,6 +1,7 @@
 package io.github.vitorcamillo.socialmcp;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -264,11 +265,11 @@ final class SessionCheck {
                                     .isBefore(agora.minus(IDADE_SOBRA))) {
                         apagarRecursivo(p);
                     }
-                } catch (IOException ignored) {
+                } catch (IOException | UncheckedIOException ignored) {
                     // melhor esforco: sobra que nao deu para conferir fica para a proxima
                 }
             }
-        } catch (IOException ignored) {
+        } catch (IOException | UncheckedIOException ignored) {
             // melhor esforco: nao derruba a leitura por falha de limpeza
         }
     }
@@ -299,7 +300,7 @@ final class SessionCheck {
                     // melhor esforco: nao derruba o comando por falha de limpeza
                 }
             }
-        } catch (IOException ignored) {
+        } catch (IOException | UncheckedIOException ignored) {
             // melhor esforco: nao derruba o comando por falha de limpeza
         }
     }
