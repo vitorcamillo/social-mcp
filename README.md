@@ -2,7 +2,7 @@
 
 **Português** · [English](README.en.md)
 
-![MIT](https://img.shields.io/badge/licen%C3%A7a-MIT-green) ![Java](https://img.shields.io/badge/Java-21-ED8B00?logo=openjdk&logoColor=white) ![MCP](https://img.shields.io/badge/MCP-server-6E56CF)
+[![CI](https://github.com/vitorcamillo/social-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/vitorcamillo/social-mcp/actions/workflows/ci.yml) ![MIT](https://img.shields.io/badge/licen%C3%A7a-MIT-green) ![Java](https://img.shields.io/badge/Java-21-ED8B00?logo=openjdk&logoColor=white) ![MCP](https://img.shields.io/badge/MCP-server-6E56CF)
 
 O Social MCP é um servidor MCP em Java 21 que opera sessões de redes sociais em um Chrome desktop real por meio do [javaDriveless](https://github.com/vitorcamillo/javaDriveless). Ele atende desenvolvedores e operadores que precisam que agentes de IA leiam páginas e preparem rascunhos de ações. O diferencial é que toda ação pública passa por cotas por rede, aprovação explícita no terminal e um kill switch local.
 
