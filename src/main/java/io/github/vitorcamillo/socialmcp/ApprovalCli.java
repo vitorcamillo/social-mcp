@@ -2,6 +2,8 @@ package io.github.vitorcamillo.socialmcp;
 
 import java.io.Console;
 import java.io.IOException;
+import io.github.selenium.javaDriverless.AuthenticatedProxyBridge;
+import io.github.selenium.javaDriverless.types.ProxyConfig;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -65,23 +67,55 @@ public final class ApprovalCli {
 
     static Importador importador = SessionImporter::run;
 
-    /** Ponto de injecao para teste; o padrao abre o Chrome visivel do perfil e espera fechar. */
     interface Navegador {
-        void abrir(Path perfil, String url) throws Exception;
+        /** proxy = config "proxy" efetiva da rede (vazio = direto), mesmo formato do BrowserPool. */
+        void abrir(Path perfil, String url, String proxy) throws Exception;
     }
 
     static Navegador navegador = ApprovalCli::abrirChromeVisivel;
 
-    /** Abre o Chrome do perfil e bloqueia ate o dono fechar (sem flags de automacao). */
-    static void abrirChromeVisivel(Path perfil, String url) throws Exception {
+    /**
+     * Abre o Chrome do perfil e bloqueia ate o dono fechar (sem flags de automacao), saindo
+     * pelo MESMO proxy da rodada: logar por outro IP quebra a identidade da conta. Proxy com
+     * usuario usa a ponte autenticada da propria lib (a mesma do BrowserPool), presa ao PID
+     * do Chrome e fechada quando ele sai.
+     */
+    static void abrirChromeVisivel(Path perfil, String url, String proxy) throws Exception {
+        AuthenticatedProxyBridge ponte = null;
+        try {
+            String proxyServer = null;
+            if (proxy != null && !proxy.isBlank()) {
+                if (proxy.contains("@")) {
+                    ponte = AuthenticatedProxyBridge.start(ProxyConfig.fromUrl(proxy));
+                    proxyServer = ponte.asChromeProxyServer();
+                } else {
+                    proxyServer = BrowserPool.normalizeProxy(proxy);
+                }
+            }
+            Process chrome = new ProcessBuilder(comandoChrome(perfil, url, proxyServer)).inheritIO().start();
+            if (ponte != null) {
+                ponte.bindOwner(chrome.pid());
+            }
+            chrome.waitFor();
+        } finally {
+            if (ponte != null) {
+                ponte.close();
+            }
+        }
+    }
+
+    static List<String> comandoChrome(Path perfil, String url, String proxyServer) {
         // mesma cifra do Chrome do MCP (lib usa --password-store=basic): sem ela os cookies saem
         // cifrados pelo chaveiro (v11), o MCP nao decifra e a rede abre deslogada (FB/Reddit 26/11)
         List<String> comando = new ArrayList<>(List.of(
                 "google-chrome", "--user-data-dir=" + perfil, "--password-store=basic"));
+        if (proxyServer != null && !proxyServer.isBlank()) {
+            comando.add("--proxy-server=" + proxyServer);
+        }
         if (url != null && !url.isEmpty()) {
             comando.add(url);
         }
-        new ProcessBuilder(comando).inheritIO().start().waitFor();
+        return comando;
     }
 
     public static void run(String[] args) {
@@ -239,7 +273,7 @@ public final class ApprovalCli {
                     String startUrl = store.networkCfg(rede).path("startUrl").asText("");
                     System.out.println("Abrindo o Chrome do perfil de " + rede
                             + ". Entre na conta da marca e FECHE o Chrome para terminar.");
-                    navegador.abrir(perfil, startUrl);
+                    navegador.abrir(perfil, startUrl, store.networkCfg(rede).path("proxy").asText(""));
                     System.out.println(SessionCheck.verificar(store, rede));
                 }
                 default -> uso();

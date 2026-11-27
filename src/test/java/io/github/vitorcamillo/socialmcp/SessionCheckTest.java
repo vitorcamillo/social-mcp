@@ -182,21 +182,52 @@ class SessionCheckTest {
     void loginAbreChromeDoPerfilComStartUrl() throws Exception {
         List<Path> perfis = new ArrayList<>();
         List<String> urls = new ArrayList<>();
-        ApprovalCli.navegador = (perfil, url) -> {
+        List<String> proxies = new ArrayList<>();
+        ApprovalCli.navegador = (perfil, url, proxy) -> {
             perfis.add(perfil);
             urls.add(url);
+            proxies.add(proxy);
         };
         SessionCheck.leitor = arquivo -> List.of();
         assertEquals(0, ApprovalCli.run(new String[]{"login", "facebook"}, store));
         assertEquals(List.of(store.profilesDir().resolve("sdk-facebook")), perfis);
         assertEquals(List.of("https://www.facebook.com/"), urls);
+        assertEquals(List.of(""), proxies);
+    }
+
+    @Test
+    void loginPassaProxyDaRede() throws Exception {
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        com.fasterxml.jackson.databind.node.ObjectNode raiz = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(
+                Files.readString(store.configPath(), java.nio.charset.StandardCharsets.UTF_8));
+        ((com.fasterxml.jackson.databind.node.ObjectNode) raiz.path("networks").path("facebook")).put("proxy", "10.0.0.1:8080");
+        Files.writeString(store.configPath(), mapper.writerWithDefaultPrettyPrinter().writeValueAsString(raiz),
+                java.nio.charset.StandardCharsets.UTF_8);
+        List<String> proxies = new ArrayList<>();
+        ApprovalCli.navegador = (perfil, url, proxy) -> {
+            proxies.add(proxy);
+        };
+        SessionCheck.leitor = arquivo -> List.of();
+        assertEquals(0, ApprovalCli.run(new String[]{"login", "facebook"}, store));
+        assertEquals(List.of("10.0.0.1:8080"), proxies);
+    }
+
+    @Test
+    void comandoChromeComESemProxy() {
+        assertEquals(
+                List.of("google-chrome", "--user-data-dir=/p", "--password-store=basic",
+                        "--proxy-server=http://10.0.0.1:8080/", "https://a/"),
+                ApprovalCli.comandoChrome(Path.of("/p"), "https://a/", "http://10.0.0.1:8080/"));
+        assertEquals(
+                List.of("google-chrome", "--user-data-dir=/p", "--password-store=basic"),
+                ApprovalCli.comandoChrome(Path.of("/p"), "", null));
     }
 
     @Test
     void loginComPerfilAbertoNaoChamaNavegador() throws Exception {
         Path perfil = perfilComCookies("facebook");
         Files.createFile(perfil.resolve("SingletonLock"));
-        ApprovalCli.navegador = (p, u) -> {
+        ApprovalCli.navegador = (p, u, x) -> {
             throw new AssertionError("navegador nao deve ser chamado com perfil aberto");
         };
         assertEquals(1, ApprovalCli.run(new String[]{"login", "facebook"}, store));
@@ -204,7 +235,7 @@ class SessionCheckTest {
 
     @Test
     void loginSemRedeERedeDesconhecida() {
-        ApprovalCli.navegador = (p, u) -> {
+        ApprovalCli.navegador = (p, u, x) -> {
             throw new AssertionError("navegador nao deve ser chamado sem rede valida");
         };
         assertEquals(1, ApprovalCli.run(new String[]{"login"}, store));
