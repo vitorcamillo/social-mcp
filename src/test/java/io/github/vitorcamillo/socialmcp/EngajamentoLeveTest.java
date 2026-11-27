@@ -367,4 +367,43 @@ class EngajamentoLeveTest {
                 Json.obj().put("batchId", "noite-1").put("day", store.today()));
         assertEquals(0, store.usageFor("bluesky").batches);
     }
+
+    @Test
+    void espacamentoMaiorQueUmDiaConsideraAcaoDeAnteontem() throws Exception {
+        Store store = novoStore();
+        comEngagement(store, "bluesky", 30, 2880);
+        String anteontem = java.time.LocalDate.parse(store.today()).minusDays(2).toString();
+        long agora = System.currentTimeMillis();
+        store.appendJournal("action", "bluesky", Json.obj().put("kind", "click").put("cls", "engagement")
+                .put("batchId", "anteontem-1").put("day", anteontem).put("ts", agora - 60_000L));
+        Guard.Decision d = Guard.check(store, "bluesky", "click", "leve-novo", agora, true);
+        assertFalse(d.allowed(), d.reason());
+        assertTrue(d.reason().contains("espacamento minimo de 2880 min"), d.reason());
+        assertEquals(0, store.usageFor("bluesky").engagementActions);
+        assertTrue(Guard.check(store, "bluesky", "click", "leve-novo", agora + 2880 * 60_000L, true).allowed());
+    }
+
+    @Test
+    void reescritaDoJournalNoLugarInvalidaCacheDeEngajamento() throws Exception {
+        Store store = novoStore();
+        comEngagement(store, "bluesky", 30, 0);
+        store.appendJournal("action", "bluesky", Json.obj().put("kind", "click").put("cls", "engagement")
+                .put("batchId", "lote-a"));
+        assertEquals(1, store.usageFor("bluesky").engagementActions);
+        java.nio.file.Path j = store.journalPath();
+        Object chave = java.nio.file.Files.readAttributes(j,
+                java.nio.file.attribute.BasicFileAttributes.class).fileKey();
+        byte[] bytes = java.nio.file.Files.readAllBytes(j);
+        String txt = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+        String trocado = txt.replace("\"engagement\"", "\"engagemenX\"");
+        assertEquals(txt.length(), trocado.length());
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(j.toFile(), "rw")) {
+            raf.seek(0);
+            raf.write(trocado.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+        assertEquals(chave, java.nio.file.Files.readAttributes(j,
+                java.nio.file.attribute.BasicFileAttributes.class).fileKey());
+        assertEquals(bytes.length, java.nio.file.Files.size(j));
+        assertEquals(0, store.usageFor("bluesky").engagementActions);
+    }
 }

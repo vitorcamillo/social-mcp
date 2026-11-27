@@ -338,6 +338,10 @@ public class Store {
     private Object engFileKey = null;
     private String engPendente = "";
     private final Map<String, Map<String, EngDia>> engPorDia = new HashMap<>();
+    /** Por rede, os 2 lotes de engajamento mais recentes (batchId -> ts), sem depender do dia. */
+    private final Map<String, Map<String, Long>> ultimosEng = new HashMap<>();
+    /** resets() do JournalIndice ja vistos: reescrita do journal invalida este cache junto. */
+    private int engResetsVistos = -1;
 
     private static final class EngDia {
         final Map<String, Long> tsPorLote = new HashMap<>();
@@ -361,13 +365,16 @@ public class Store {
         EngDia d = engDe(hoje, network);
         EngDia dOntem = engDe(ontem, network);
         int n = d == null ? 0 : d.acoesLegadas;
+        if (d != null) {
+            for (String id : d.tsPorLote.keySet()) {
+                if (!id.equals(excludeBatchId)) n++;
+            }
+        }
         long maxTs = 0;
-        for (EngDia dia : new EngDia[]{d, dOntem}) {
-            if (dia == null) continue;
-            for (Map.Entry<String, Long> e : dia.tsPorLote.entrySet()) {
-                if (e.getKey().equals(excludeBatchId)) continue;
-                if (dia == d) n++;
-                maxTs = Math.max(maxTs, e.getValue());
+        Map<String, Long> ultimos = ultimosEng.get(network);
+        if (ultimos != null) {
+            for (Map.Entry<String, Long> e : ultimos.entrySet()) {
+                if (!e.getKey().equals(excludeBatchId)) maxTs = Math.max(maxTs, e.getValue());
             }
         }
         u.engagementActions = n;
@@ -392,10 +399,13 @@ public class Store {
     private void atualizarEngajamento() throws IOException {
         BasicFileAttributes attrs = Files.readAttributes(journalPath(), BasicFileAttributes.class);
         long tamanho = attrs.size();
-        if (!Objects.equals(engFileKey, attrs.fileKey()) || tamanho < engOffset) {
+        if (!Objects.equals(engFileKey, attrs.fileKey()) || tamanho < engOffset
+                || journalIndice.resets() != engResetsVistos) {
             engOffset = 0;
             engPendente = "";
             engPorDia.clear();
+            ultimosEng.clear();
+            engResetsVistos = journalIndice.resets();
         }
         engFileKey = attrs.fileKey();
         if (tamanho == engOffset) return;
@@ -427,6 +437,7 @@ public class Store {
                 engOffset = 0;
                 engPendente = "";
                 engPorDia.clear();
+                ultimosEng.clear();
                 throw new RuntimeException("Falha ao ler journal: linha de engajamento ilegivel", e);
             }
         }
@@ -441,8 +452,18 @@ public class Store {
         String batchId = e.path("batchId").asText("");
         String type = e.path("type").asText("");
         if ("action".equals(type) && "engagement".equals(e.path("cls").asText(""))) {
+            long ts = e.path("ts").asLong(0);
             if (batchId.isEmpty()) d.acoesLegadas++;
-            else d.tsPorLote.merge(batchId, e.path("ts").asLong(0), Math::max);
+            else d.tsPorLote.merge(batchId, ts, Math::max);
+            Map<String, Long> ultimos = ultimosEng.computeIfAbsent(network, k -> new HashMap<>());
+            ultimos.merge(batchId, ts, Math::max);
+            if (ultimos.size() > 2) {
+                String menor = null;
+                for (Map.Entry<String, Long> u : ultimos.entrySet()) {
+                    if (menor == null || u.getValue() < ultimos.get(menor)) menor = u.getKey();
+                }
+                ultimos.remove(menor);
+            }
         } else if (EVENTO_LOTE_ENGAJAMENTO.equals(type)) {
             if (!batchId.isEmpty()) d.marcados.add(batchId);
         } else if ("batch_executed".equals(type)) {
