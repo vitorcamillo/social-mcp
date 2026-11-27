@@ -21,7 +21,7 @@ if set(m) != {'schema', 'repository', 'commit', 'version', 'archive_sha256', 'ja
     raise ValueError('invalid manifest schema')
 if m['repository'] != 'https://github.com/vitorcamillo/javaDriveless':
     raise ValueError('invalid public repository')
-if not re.fullmatch(r'[0-9a-f]{40}', m['commit']) or m['version'] != '1.12.3':
+if not re.fullmatch(r'[0-9a-f]{40}', m['commit']) or m['version'] != '2.0.2':
     raise ValueError('invalid commit or version')
 for key in ('archive_sha256', 'jar_sha256', 'pom_sha256'):
     if not re.fullmatch(r'[0-9a-f]{64}', m[key]):

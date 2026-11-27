@@ -1,9 +1,9 @@
 {
   "schema": 1,
-  "version": "1.12.3",
+  "version": "2.0.2",
   "repository": "https://github.com/vitorcamillo/javaDriveless",
-  "commit": "1521539b26c7c60c44988ba04919dfab7898f5c4",
-  "archive_sha256": "91afa02207fbe89d114e3ecdfafe0e2042899b5f81b26787c4deba3165dbd0c3",
-  "jar_sha256": "09087df7c576600a69cf0345d0c0f4a919b075228b0234c2a5b026326a1a4fc5",
-  "pom_sha256": "5e5739af9776941af5125dacb811367fc824bc750f3860b3857c03286beb4b69"
+  "commit": "d09c87925671f6f64d43d696e18a63257185d26e",
+  "archive_sha256": "f42eabd16954e6b26f6cebb162c0754b9d39e8a347a3adf49a6816a3974d49cf",
+  "jar_sha256": "32eea53739f89f41f6f5ca7a66aa9f6252a4e813d58edeff1006256b18729c69",
+  "pom_sha256": "021fc2af963e8b8bbe2811413745f35b3355021c46395f631e91ad49667afe0e"
 }
