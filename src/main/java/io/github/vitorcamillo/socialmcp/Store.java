@@ -355,29 +355,37 @@ public class Store {
     private void completarEngajamento(Usage u, String network, String excludeBatchId, String hoje)
             throws IOException {
         atualizarEngajamento();
-        engPorDia.keySet().removeIf(k -> k.compareTo(hoje) < 0);
-        Map<String, EngDia> porRede = engPorDia.get(hoje);
-        EngDia d = porRede == null ? null : porRede.get(network);
-        if (d == null) {
-            u.engagementActions = 0;
-            u.lastEngagementMs = 0;
-            return;
-        }
-        int n = d.acoesLegadas;
+        // guarda ontem tambem: espacamento e marcador de lote atravessam a meia-noite
+        String ontem = LocalDate.parse(hoje).minusDays(1).toString();
+        engPorDia.keySet().removeIf(k -> k.compareTo(ontem) < 0);
+        EngDia d = engDe(hoje, network);
+        EngDia dOntem = engDe(ontem, network);
+        int n = d == null ? 0 : d.acoesLegadas;
         long maxTs = 0;
-        for (Map.Entry<String, Long> e : d.tsPorLote.entrySet()) {
-            if (e.getKey().equals(excludeBatchId)) continue;
-            n++;
-            maxTs = Math.max(maxTs, e.getValue());
+        for (EngDia dia : new EngDia[]{d, dOntem}) {
+            if (dia == null) continue;
+            for (Map.Entry<String, Long> e : dia.tsPorLote.entrySet()) {
+                if (e.getKey().equals(excludeBatchId)) continue;
+                if (dia == d) n++;
+                maxTs = Math.max(maxTs, e.getValue());
+            }
         }
         u.engagementActions = n;
         u.lastEngagementMs = maxTs;
+        if (d == null) return;
+        Set<String> marcados = new HashSet<>(d.marcados);
+        if (dOntem != null) marcados.addAll(dOntem.marcados);
         int levesExecutados = 0;
-        for (String id : d.marcados) {
+        for (String id : marcados) {
             if (id.equals(excludeBatchId)) continue;
             if (d.executados.contains(id)) levesExecutados++;
         }
         u.batches = Math.max(0, u.batches - levesExecutados);
+    }
+
+    private EngDia engDe(String dia, String network) {
+        Map<String, EngDia> porRede = engPorDia.get(dia);
+        return porRede == null ? null : porRede.get(network);
     }
 
     /** Le os bytes novos do journal agregando so eventos de engajamento (com fragmento retido). */

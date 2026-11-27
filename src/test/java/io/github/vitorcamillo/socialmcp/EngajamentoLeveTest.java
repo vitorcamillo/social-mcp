@@ -334,4 +334,37 @@ class EngajamentoLeveTest {
         assertTrue(sem.path("redes").path("bluesky").path("engajamentoHoje").isMissingNode());
         assertTrue(sem.path("redes").path("bluesky").path("cotaEngajamento").isMissingNode());
     }
+
+    // ---------- virada do dia ----------
+
+    @Test
+    void espacamentoDeEngajamentoAtravessaMeiaNoite() throws Exception {
+        Store store = novoStore();
+        comEngagement(store, "bluesky", 30, 30);
+        String ontem = java.time.LocalDate.parse(store.today()).minusDays(1).toString();
+        long agora = System.currentTimeMillis();
+        // acao as 23h59 de ontem (1 min atras): a de 00h01 tem que esperar o espacamento
+        store.appendJournal("action", "bluesky", Json.obj().put("kind", "click").put("cls", "engagement")
+                .put("batchId", "ontem-1").put("day", ontem).put("ts", agora - 60_000L));
+        Guard.Decision d = Guard.check(store, "bluesky", "click", "leve-novo", agora, true);
+        assertFalse(d.allowed(), d.reason());
+        assertTrue(d.reason().contains("espacamento minimo de 30 min entre acoes de engajamento"), d.reason());
+        // nao conta na cota de hoje: a acao foi ontem
+        assertEquals(0, store.usageFor("bluesky").engagementActions);
+        // passado o espacamento, libera
+        assertTrue(Guard.check(store, "bluesky", "click", "leve-novo", agora + 30 * 60_000L, true).allowed());
+    }
+
+    @Test
+    void loteLeveQueAtravessaMeiaNoiteNaoGastaCotaDeLotes() throws Exception {
+        Store store = novoStore();
+        comEngagement(store, "bluesky", 30, 0);
+        String ontem = java.time.LocalDate.parse(store.today()).minusDays(1).toString();
+        // marcado como leve antes da meia-noite, executado depois
+        store.appendJournal(Store.EVENTO_LOTE_ENGAJAMENTO, "bluesky",
+                Json.obj().put("batchId", "noite-1").put("day", ontem));
+        store.appendJournal("batch_executed", "bluesky",
+                Json.obj().put("batchId", "noite-1").put("day", store.today()));
+        assertEquals(0, store.usageFor("bluesky").batches);
+    }
 }
