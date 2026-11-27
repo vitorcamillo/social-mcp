@@ -40,8 +40,23 @@ public final class Guard {
         return check(store, network, kind, currentBatchId, System.currentTimeMillis());
     }
 
+    /**
+     * Variante para lote de engajamento leve: quando o lote em curso e leve com cota propria
+     * ativa, os passos publicos dele consultam a cota de engajamento em vez da cota de posts.
+     */
+    public static Decision check(Store store, String network, String kind, String currentBatchId,
+            boolean loteLeve) {
+        return check(store, network, kind, currentBatchId, System.currentTimeMillis(), loteLeve);
+    }
+
     /** Variante com relogio injetado (teste); o caminho publico usa System.currentTimeMillis(). */
     static Decision check(Store store, String network, String kind, String currentBatchId, long agoraMs) {
+        return check(store, network, kind, currentBatchId, agoraMs, false);
+    }
+
+    /** Variante com relogio injetado e lote leve (teste); o caminho publico usa System.currentTimeMillis(). */
+    static Decision check(Store store, String network, String kind, String currentBatchId, long agoraMs,
+            boolean loteLeve) {
         if (!store.knownNetworks().contains(network)) {
             return new Decision(false, "rede desconhecida: '" + network + "'. Redes validas: " + store.knownNetworks());
         }
@@ -67,9 +82,26 @@ public final class Guard {
             return new Decision(false, motivoTravaIncerteza(network, pendentes));
         }
         ObjectNode cfg = store.networkCfg(network);
+        EngajamentoLeve.Cota eng = loteLeve && isPublic(kind) ? EngajamentoLeve.cota(cfg) : null;
+        Store.Usage u = store.usageFor(network, currentBatchId);
+        if (eng != null) {
+            if (u.engagementActions + 1 > eng.maxPerDay()) {
+                return new Decision(false, "cota diaria de engajamento de '" + network + "' esgotada ("
+                        + u.engagementActions + "/" + eng.maxPerDay() + "). Volte amanha.");
+            }
+            if (u.lastEngagementMs > 0 && eng.minMinutesBetween() > 0) {
+                long need = (long) eng.minMinutesBetween() * 60_000L;
+                long elapsed = agoraMs - u.lastEngagementMs;
+                if (elapsed < need) {
+                    long faltaMin = (need - elapsed + 59_999) / 60_000;
+                    return new Decision(false, "espacamento minimo de " + eng.minMinutesBetween()
+                            + " min entre acoes de engajamento em '" + network + "'; faltam ~" + faltaMin + " min");
+                }
+            }
+            return new Decision(true, "dentro da cota de engajamento");
+        }
         int maxPub = cfg.path("maxPublicActionsPerDay").asInt(5);
         int minMin = cfg.path("minMinutesBetweenPublicActions").asInt(30);
-        Store.Usage u = store.usageFor(network, currentBatchId);
         if (u.publicActions >= maxPub) {
             return new Decision(false, "cota diaria de acoes publicas de '" + network + "' esgotada ("
                     + u.publicActions + "/" + maxPub + "). Volte amanha.");

@@ -3,10 +3,13 @@ package io.github.vitorcamillo.socialmcp;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
+import java.nio.channels.SeekableByteChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -15,11 +18,16 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -278,6 +286,10 @@ public class Store {
         public int publicActions;
         public int batches;
         public long lastPublicActionMs;
+        /** Lotes de engajamento leve executados hoje (cota propria; nao consome a cota de posts). */
+        public int engagementActions;
+        /** Ts (ms) da ultima acao de engajamento (espacamento proprio; nao move lastPublicActionMs). */
+        public long lastEngagementMs;
     }
 
     public Usage usageFor(String network) {
@@ -295,7 +307,9 @@ public class Store {
         synchronized (journalLock) {
             try (Trava ignored = lock("journal")) {
                 journalIndice.atualizar(day);
-                return journalIndice.uso(network, excludeBatchId, day);
+                Usage u = journalIndice.uso(network, excludeBatchId, day);
+                completarEngajamento(u, network, excludeBatchId, day);
+                return u;
             } catch (IOException e) {
                 // sem historico nao ha como conferir cota/espacamento: falha fecha, nunca libera com zero
                 throw new RuntimeException("Falha ao ler journal: " + e.getMessage(), e);
@@ -312,6 +326,119 @@ public class Store {
             } catch (IOException e) {
                 throw new RuntimeException("Falha ao ler journal: " + e.getMessage(), e);
             }
+        }
+    }
+
+    // ---------- cota propria de engajamento leve ----------
+
+    /** Evento do journal que marca um batchId como lote de engajamento (nao consome maxBatchesPerDay). */
+    static final String EVENTO_LOTE_ENGAJAMENTO = "engagement_batch";
+
+    private long engOffset = 0;
+    private Object engFileKey = null;
+    private String engPendente = "";
+    private final Map<String, Map<String, EngDia>> engPorDia = new HashMap<>();
+
+    private static final class EngDia {
+        final Map<String, Long> tsPorLote = new HashMap<>();
+        int acoesLegadas;
+        final Set<String> executados = new HashSet<>();
+        final Set<String> marcados = new HashSet<>();
+    }
+
+    /**
+     * Completa o Usage com a cota propria de engajamento, derivada do mesmo journal (mesma fonte
+     * de verdade e mesmo dia de usageFor): acoes com cls=engagement contam como 1 por lote (o
+     * proprio lote nao se bloqueia) e lotes marcados como engajamento nao consomem
+     * maxBatchesPerDay. Le so os bytes novos do journal desde a ultima chamada.
+     */
+    private void completarEngajamento(Usage u, String network, String excludeBatchId, String hoje)
+            throws IOException {
+        atualizarEngajamento();
+        engPorDia.keySet().removeIf(k -> k.compareTo(hoje) < 0);
+        Map<String, EngDia> porRede = engPorDia.get(hoje);
+        EngDia d = porRede == null ? null : porRede.get(network);
+        if (d == null) {
+            u.engagementActions = 0;
+            u.lastEngagementMs = 0;
+            return;
+        }
+        int n = d.acoesLegadas;
+        long maxTs = 0;
+        for (Map.Entry<String, Long> e : d.tsPorLote.entrySet()) {
+            if (e.getKey().equals(excludeBatchId)) continue;
+            n++;
+            maxTs = Math.max(maxTs, e.getValue());
+        }
+        u.engagementActions = n;
+        u.lastEngagementMs = maxTs;
+        int levesExecutados = 0;
+        for (String id : d.marcados) {
+            if (id.equals(excludeBatchId)) continue;
+            if (d.executados.contains(id)) levesExecutados++;
+        }
+        u.batches = Math.max(0, u.batches - levesExecutados);
+    }
+
+    /** Le os bytes novos do journal agregando so eventos de engajamento (com fragmento retido). */
+    private void atualizarEngajamento() throws IOException {
+        BasicFileAttributes attrs = Files.readAttributes(journalPath(), BasicFileAttributes.class);
+        long tamanho = attrs.size();
+        if (!Objects.equals(engFileKey, attrs.fileKey()) || tamanho < engOffset) {
+            engOffset = 0;
+            engPendente = "";
+            engPorDia.clear();
+        }
+        engFileKey = attrs.fileKey();
+        if (tamanho == engOffset) return;
+        String texto;
+        try (SeekableByteChannel ch = Files.newByteChannel(journalPath(), StandardOpenOption.READ)) {
+            ch.position(engOffset);
+            ByteBuffer buf = ByteBuffer.allocate(64 * 1024);
+            ByteArrayOutputStream acumulado = new ByteArrayOutputStream();
+            int n;
+            while ((n = ch.read(buf)) > 0) {
+                buf.flip();
+                byte[] parte = new byte[buf.remaining()];
+                buf.get(parte);
+                acumulado.write(parte, 0, parte.length);
+                buf.clear();
+            }
+            engOffset = tamanho;
+            texto = engPendente + acumulado.toString(StandardCharsets.UTF_8);
+        }
+        engPendente = "";
+        int corte = Math.max(texto.lastIndexOf('\n'), texto.lastIndexOf('\r'));
+        String completo = corte < 0 ? "" : texto.substring(0, corte + 1);
+        engPendente = corte < 0 ? texto : texto.substring(corte + 1);
+        for (String linha : completo.split("[\r\n]+")) {
+            if (!linha.contains("engagement") && !linha.contains("\"batch_executed\"")) continue;
+            try {
+                agregarEngajamento(Json.parse(linha));
+            } catch (RuntimeException e) {
+                engOffset = 0;
+                engPendente = "";
+                engPorDia.clear();
+                throw new RuntimeException("Falha ao ler journal: linha de engajamento ilegivel", e);
+            }
+        }
+    }
+
+    private void agregarEngajamento(JsonNode e) {
+        String network = e.path("network").asText("");
+        String dia = e.path("day").asText("");
+        if (network.isEmpty() || dia.isEmpty()) return;
+        EngDia d = engPorDia.computeIfAbsent(dia, k -> new HashMap<>())
+                .computeIfAbsent(network, k -> new EngDia());
+        String batchId = e.path("batchId").asText("");
+        String type = e.path("type").asText("");
+        if ("action".equals(type) && "engagement".equals(e.path("cls").asText(""))) {
+            if (batchId.isEmpty()) d.acoesLegadas++;
+            else d.tsPorLote.merge(batchId, e.path("ts").asLong(0), Math::max);
+        } else if (EVENTO_LOTE_ENGAJAMENTO.equals(type)) {
+            if (!batchId.isEmpty()) d.marcados.add(batchId);
+        } else if ("batch_executed".equals(type)) {
+            if (!batchId.isEmpty()) d.executados.add(batchId);
         }
     }
 

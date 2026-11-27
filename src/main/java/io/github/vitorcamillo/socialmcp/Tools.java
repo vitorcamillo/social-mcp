@@ -145,6 +145,11 @@ public class Tools {
             e.put("minutosEntrePublicas", cfg.path("minMinutesBetweenPublicActions").asInt(30));
             e.put("lotesHoje", u.batches);
             e.put("cotaLotes", cfg.path("maxBatchesPerDay").asInt(4));
+            EngajamentoLeve.Cota engajamento = EngajamentoLeve.cota(cfg);
+            if (engajamento != null) {
+                e.put("engajamentoHoje", u.engagementActions);
+                e.put("cotaEngajamento", engajamento.maxPerDay());
+            }
             e.put("maxPassosPublicosPorLote", cfg.path("maxPublicStepsPerBatch").asInt(5));
             e.put("ultimaAcaoPublica", u.lastPublicActionMs == 0 ? "nunca" : Instant.ofEpochMilli(u.lastPublicActionMs).toString());
         }
@@ -360,9 +365,11 @@ public class Tools {
         for (JsonNode a : actions) {
             ObjectNode p = pre.addObject();
             p.put("passo", i++);
-            p.put("network", a.path("network").asText());
+            String anet = a.path("network").asText();
+            p.put("network", anet);
             p.put("kind", a.path("kind").asText());
-            Guard.Decision dec = Guard.check(store, a.path("network").asText(), a.path("kind").asText(), id);
+            boolean levePasso = EngajamentoLeve.cota(store.networkCfg(anet)) != null && EngajamentoLeve.eh(batch);
+            Guard.Decision dec = Guard.check(store, anet, a.path("kind").asText(), id, levePasso);
             p.put("guarda", dec.toString());
         }
         ObjectNode out = Json.obj();
@@ -878,11 +885,17 @@ public class Tools {
         if (store.isStopped()) {
             throw new IllegalStateException("kill-switch ativo; lote nao executado. O dono decide: bin/social-mcp --cli stop off");
         }
-        // limite de lotes por dia e POR REDE (cada agente cuida de uma rede)
-        int maxBatches = store.networkCfg(net).path("maxBatchesPerDay").asInt(4);
-        int feitos = store.usageFor(net).batches;
-        if (feitos >= maxBatches) {
-            throw new IllegalStateException("cota diaria de lotes de '" + net + "' esgotada (" + feitos + "/" + maxBatches + "). Volte amanha.");
+        // cota propria de engajamento leve: com engagement ativo e lote leve valem a cota e o
+        // espacamento proprios, sem contar em maxBatchesPerDay nem em maxPublicActionsPerDay
+        EngajamentoLeve.Cota eng = EngajamentoLeve.cota(store.networkCfg(net));
+        boolean leve = eng != null && EngajamentoLeve.eh(batch);
+        if (!leve) {
+            // limite de lotes por dia e POR REDE (cada agente cuida de uma rede)
+            int maxBatches = store.networkCfg(net).path("maxBatchesPerDay").asInt(4);
+            int feitos = store.usageFor(net).batches;
+            if (feitos >= maxBatches) {
+                throw new IllegalStateException("cota diaria de lotes de '" + net + "' esgotada (" + feitos + "/" + maxBatches + "). Volte amanha.");
+            }
         }
 
         // fail-fast: valida cota, espacamento e estado da rede do lote. Cota e
@@ -894,7 +907,32 @@ public class Tools {
                 break;
             }
         }
-        if (temPassoPublico) {
+        if (leve) {
+            // mesma trava do Guard.check, aqui antes do claim: o lote nem e reservado
+            List<String> pendentesLeve = store.incertezasPendentes(net);
+            if (!pendentesLeve.isEmpty()) {
+                throw new IllegalStateException(Guard.motivoTravaIncerteza(net, pendentesLeve));
+            }
+            Store.Usage usoLeve = store.usageFor(net, id);
+            if (usoLeve.engagementActions + 1 > eng.maxPerDay()) {
+                throw new IllegalStateException("cota diaria de engajamento de '" + net + "' esgotada ("
+                        + usoLeve.engagementActions + "/" + eng.maxPerDay() + "). Volte amanha.");
+            }
+            if (usoLeve.lastEngagementMs > 0 && eng.minMinutesBetween() > 0) {
+                long needLeve = (long) eng.minMinutesBetween() * 60_000L;
+                long faltaLeve = needLeve - (relogio.getAsLong() - usoLeve.lastEngagementMs);
+                if (faltaLeve > 0) {
+                    throw new IllegalStateException("espacamento minimo de " + eng.minMinutesBetween()
+                            + " min entre acoes de engajamento em '" + net + "'; faltam ~"
+                            + ((faltaLeve + 59_999) / 60_000) + " min");
+                }
+            }
+            String estadoLeve = store.effectiveState(net);
+            if (!"healthy".equals(estadoLeve)) {
+                throw new IllegalStateException("rede '" + net + "' esta '" + estadoLeve + "'; reexecute depois que o dono liberar");
+            }
+            marcarLoteEngajamento(store, net, id);
+        } else if (temPassoPublico) {
             // mesma trava do Guard.check, aqui antes do claim: o lote nem e reservado
             List<String> pendentes = store.incertezasPendentes(net);
             if (!pendentes.isEmpty()) {
@@ -943,7 +981,7 @@ public class Tools {
                             + "; a chamada MCP seria cortada pelo cliente";
                     break;
                 }
-                Guard.Decision dec = Guard.check(store, network, kind, id);
+                Guard.Decision dec = Guard.check(store, network, kind, id, leve);
                 if (!dec.allowed()) {
                     abortReason = "guarda bloqueou o passo " + (done + 1) + " (" + network + "/" + kind + "): " + dec.reason();
                     break;
@@ -960,7 +998,7 @@ public class Tools {
                     if ("verify_new_id".equals(kind) && !step.path("idNovo").asText("").isEmpty()) {
                         idsNovosLote.put(a.path("name").asText(""), step.path("idNovo").asText());
                     }
-                    journalAction(store, network, kind, a, id, step, true);
+                    journalAction(store, network, kind, a, id, step, true, leve);
                     if (Guard.isPublic(kind) && !step.path("pulado").asBoolean(false)) publicoFeito = true;
                     // envio de fato (ex.: botao Publicar), nao clique de foco/composer; se pulado (ifPresent
                     // ausente) nao houve tentativa; verify_new_id com 2+ itens novos = possivel publicacao em dobro
@@ -1001,7 +1039,7 @@ public class Tools {
                     if (talvezAgiu(kind, e, step)) {
                         publicoFeito = true;
                         if (ehEnvio(actions, passoIdx)) envioFeito = true;
-                        journalAction(store, network, kind, a, id, step, false);
+                        journalAction(store, network, kind, a, id, step, false, leve);
                     }
                     // status 0 = resultado incerto (sempre marcado); sem status ou < 0 = fetch nem saiu
                     if ("request".equals(kind) && step.path("status").asInt(-1) >= 0) {
@@ -1161,12 +1199,27 @@ public class Tools {
         };
     }
 
+    /** Marca o batchId como lote de engajamento no journal: executado, nao consome maxBatchesPerDay. */
+    static void marcarLoteEngajamento(Store store, String network, String batchId) {
+        store.appendJournal(Store.EVENTO_LOTE_ENGAJAMENTO, network,
+                Json.obj().put("batchId", batchId).put("day", store.today()));
+    }
+
     /** Journal da acao (ok=false = passo que falhou depois de despachar; conta para cota).
      * Request grava so url, method, status, auth.from e 300 chars do corpo (nunca headers/token/body enviado). */
     static void journalAction(Store store, String network, String kind, JsonNode a, String batchId, ObjectNode step, boolean ok) {
+        journalAction(store, network, kind, a, batchId, step, ok, false);
+    }
+
+    /** Variante do lote de engajamento leve: passos publicos do lote leve com cota ativa saem com cls=engagement. */
+    static void journalAction(Store store, String network, String kind, JsonNode a, String batchId, ObjectNode step, boolean ok, boolean engajamento) {
+        String cls;
+        if (step.path("pulado").asBoolean(false)) cls = "skipped";
+        else if (engajamento && Guard.isPublic(kind)) cls = "engagement";
+        else cls = Guard.isPublic(kind) ? "public" : "read";
         ObjectNode j = Json.obj()
                 .put("kind", kind)
-                .put("cls", step.path("pulado").asBoolean(false) ? "skipped" : Guard.isPublic(kind) ? "public" : "read")
+                .put("cls", cls)
                 .put("batchId", batchId)
                 .put("day", store.today())
                 .put("desc", a.path("description").asText(""));
