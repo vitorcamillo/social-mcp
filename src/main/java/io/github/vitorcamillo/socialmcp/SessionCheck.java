@@ -196,7 +196,8 @@ final class SessionCheck {
      * python3 e apaga o temporario no finally. Nunca toca no valor dos cookies.
      */
     static List<Cookie> lerViaPython(Path arquivoCookies) throws Exception {
-        Path tmp = Files.createTempDirectory("social-sessao-");
+        limparSobras(Path.of(System.getProperty("java.io.tmpdir")), Instant.now());
+        Path tmp = Files.createTempDirectory(PREFIXO_TMP);
         try {
             for (String nome : new String[]{"Cookies", "Cookies-journal", "Cookies-wal"}) {
                 Path origem = arquivoCookies.resolveSibling(nome);
@@ -242,6 +243,33 @@ final class SessionCheck {
             return List.copyOf(cookies);
         } finally {
             apagarRecursivo(tmp);
+        }
+    }
+
+    static final String PREFIXO_TMP = "social-sessao-";
+    /** Bem acima do timeout de 15 s da leitura: pasta mais velha que isso nao e de leitura viva. */
+    static final java.time.Duration IDADE_SOBRA = java.time.Duration.ofMinutes(10);
+
+    /**
+     * Apaga copias temporarias esquecidas por um processo morto no meio da leitura (kill -9 pula o
+     * finally). So pastas reais com o prefixo, do usuario atual e mais velhas que IDADE_SOBRA.
+     */
+    static void limparSobras(Path base, Instant agora) {
+        try (var pastas = Files.newDirectoryStream(base, PREFIXO_TMP + "*")) {
+            for (Path p : pastas) {
+                try {
+                    if (Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)
+                            && Files.getOwner(p, LinkOption.NOFOLLOW_LINKS).getName().equals(System.getProperty("user.name"))
+                            && Files.getLastModifiedTime(p, LinkOption.NOFOLLOW_LINKS).toInstant()
+                                    .isBefore(agora.minus(IDADE_SOBRA))) {
+                        apagarRecursivo(p);
+                    }
+                } catch (IOException ignored) {
+                    // melhor esforco: sobra que nao deu para conferir fica para a proxima
+                }
+            }
+        } catch (IOException ignored) {
+            // melhor esforco: nao derruba a leitura por falha de limpeza
         }
     }
 

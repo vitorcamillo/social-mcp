@@ -345,7 +345,33 @@ class SessionCheckTest {
             assertFalse(Long.toString(c.expiresUtc()).contains("SEGREDO123"));
             assertFalse(c.cifra().contains("SEGREDO123"));
         }
-        assertEquals(antes, depois, "diretorio temporario de copia deve ser apagado");
+        // a leitura pode varrer sobra antiga de outro processo: so nao pode deixar pasta nova
+        assertTrue(antes.containsAll(depois), "diretorio temporario de copia deve ser apagado");
+    }
+
+    @Test
+    void limparSobrasApagaSoPastaVelhaDoPrefixo() throws Exception {
+        Path base = Files.createDirectories(tmp.resolve("tmpbase"));
+        Instant agora = Instant.now();
+        Path velha = Files.createDirectories(base.resolve(SessionCheck.PREFIXO_TMP + "velha"));
+        Files.writeString(velha.resolve("Cookies"), "x");
+        Files.setLastModifiedTime(velha, java.nio.file.attribute.FileTime.from(agora.minus(11, ChronoUnit.MINUTES)));
+        Path nova = Files.createDirectories(base.resolve(SessionCheck.PREFIXO_TMP + "nova"));
+        Files.setLastModifiedTime(nova, java.nio.file.attribute.FileTime.from(agora.minus(9, ChronoUnit.MINUTES)));
+        Path alheia = Files.createDirectories(base.resolve("outra-coisa"));
+        Files.setLastModifiedTime(alheia, java.nio.file.attribute.FileTime.from(agora.minus(1, ChronoUnit.DAYS)));
+        Path alvoDoLink = Files.createDirectories(tmp.resolve("nao-apagar"));
+        Files.writeString(alvoDoLink.resolve("f"), "x");
+        Path link = Files.createSymbolicLink(base.resolve(SessionCheck.PREFIXO_TMP + "link"), alvoDoLink);
+
+        SessionCheck.limparSobras(base, agora);
+
+        assertFalse(Files.exists(velha), "sobra velha deve sumir");
+        assertTrue(Files.exists(nova), "leitura que pode estar viva fica");
+        assertTrue(Files.exists(alheia), "pasta sem o prefixo fica");
+        assertTrue(Files.isSymbolicLink(link), "link nao e seguido nem apagado");
+        assertTrue(Files.exists(alvoDoLink.resolve("f")), "alvo do link intacto");
+        SessionCheck.limparSobras(base.resolve("nao-existe"), agora); // base ausente nao lanca
     }
 
     private static Set<String> temporariosSessao() throws Exception {
