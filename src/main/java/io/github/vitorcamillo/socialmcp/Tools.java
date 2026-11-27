@@ -138,6 +138,8 @@ public class Tools {
             String reason = store.stateReason(n);
             if (reason != null) e.put("motivoEstado", reason);
             e.put("startUrl", cfg.path("startUrl").asText(""));
+            // so nome/validade/etiqueta de cifra dos cookies (nunca valor): rede deslogada aparece antes de navegar
+            e.put("sessao", SessionCheck.estado(store, n));
             e.put("acoesPublicasHoje", u.publicActions);
             e.put("cotaDiaria", cfg.path("maxPublicActionsPerDay").asInt(5));
             e.put("minutosEntrePublicas", cfg.path("minMinutesBetweenPublicActions").asInt(30));
@@ -2139,7 +2141,7 @@ public class Tools {
             [
               {
                 "name": "social_status",
-                "description": "Estado das redes do Social MCP: kill-switch, saude por rede, cotas de hoje e ultima acao publica. Consulte SEMPRE antes de planejar acoes.",
+                "description": "Estado das redes do Social MCP: kill-switch, saude por rede, sessao (logado/deslogado pelos cookies de login), cotas de hoje e ultima acao publica. Consulte SEMPRE antes de planejar acoes. Se sessao comecar com 'deslogado', NAO navegue logado nessa rede: pare e avise o dono para rodar --cli login <rede>.",
                 "inputSchema": { "type": "object", "properties": {} }
               },
               {

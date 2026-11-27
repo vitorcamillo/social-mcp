@@ -23,8 +23,12 @@ import java.util.concurrent.TimeUnit;
 final class SessionCheck {
     private SessionCheck() {}
 
-    /** expiresUtc em microssegundos desde 1601-01-01 (0 = cookie de sessao). */
-    record Cookie(String host, String name, long expiresUtc) {}
+    /** expiresUtc em microssegundos desde 1601-01-01 (0 = cookie de sessao). cifra: so etiqueta v10/v11 ou vazio. */
+    record Cookie(String host, String name, long expiresUtc, String cifra) {
+        Cookie(String host, String name, long expiresUtc) {
+            this(host, name, expiresUtc, "");
+        }
+    }
 
     /** Recebe o Cookies ORIGINAL; a impl padrao copia e le a copia. */
     interface LeitorCookies {
@@ -50,22 +54,33 @@ final class SessionCheck {
             DateTimeFormatter.ofPattern("yyyy-MM-dd").withZone(ZoneOffset.UTC);
     private static final String AVISO_ABERTO = " [perfil aberto: feche o Chrome antes da rodada]";
 
-    /** Le so host_key/name/expires_utc; o corpo nunca menciona value/encrypted_value. */
+    /**
+     * Le so host_key/name/expires_utc e a etiqueta de versao da cifra; o corpo nunca menciona
+     * value/encrypted_value. Do valor cifrado sai SOMENTE a etiqueta de versao (v10, v11 ou vazio),
+     * nunca o valor.
+     */
     static final String SCRIPT_PYTHON = """
             import sqlite3
             import sys
             con = sqlite3.connect(sys.argv[1])
             try:
-                cur = con.execute("select host_key, name, expires_utc from cookies")
-                for host, name, exp in cur:
-                    sys.stdout.write(str(host) + "\\t" + str(name) + "\\t" + str(int(exp)) + "\\n")
+                cur = con.execute("select host_key, name, expires_utc, substr(encrypted_value, 1, 3) from cookies")
+                for host, name, exp, ev in cur:
+                    etq = bytes(ev or b"")[:3]
+                    cifra = etq.decode("ascii") if etq in (b"v10", b"v11") else ""
+                    sys.stdout.write(str(host) + "\\t" + str(name) + "\\t" + str(int(exp)) + "\\t" + cifra + "\\n")
             finally:
                 con.close()
             """;
 
-    /** Uma linha de relatorio da rede. */
+    /** Uma linha de relatorio da rede, com prefixo de 12 colunas ("rede       "). */
     static String verificar(Store store, String rede) {
-        String prefixo = String.format("%-11s ", rede);
+        return String.format("%-11s ", rede) + estado(store, rede);
+    }
+
+    /** O texto da linha de relatorio sem o prefixo da rede. */
+    static String estado(Store store, String rede) {
+        String prefixo = "";
         Path perfil = store.profilesDir().resolve("sdk-" + rede);
         boolean aberto = perfilAberto(perfil);
         String fim = aberto ? AVISO_ABERTO : "";
@@ -89,6 +104,7 @@ final class SessionCheck {
         Instant agora = Instant.now(relogio);
         List<String> faltando = new ArrayList<>();
         List<Long> validades = new ArrayList<>();
+        List<Cookie> achados = new ArrayList<>();
         for (String nome : regra.nomes()) {
             Cookie achado = null;
             for (Cookie c : lidos) {
@@ -101,10 +117,17 @@ final class SessionCheck {
                 faltando.add(nome);
             } else {
                 validades.add(achado.expiresUtc());
+                achados.add(achado);
             }
         }
         if (!faltando.isEmpty()) {
             return prefixo + "deslogado (falta " + String.join(", ", faltando) + ")" + fim;
+        }
+        for (Cookie achado : achados) {
+            if ("v11".equals(achado.cifra())) {
+                return prefixo + "deslogado para o MCP (cookies cifrados pelo chaveiro: relogue com --cli login "
+                        + rede + ")" + fim;
+            }
         }
         List<Long> comPrazo = validades.stream().filter(e -> e != 0L).toList();
         if (comPrazo.isEmpty()) {
@@ -204,7 +227,7 @@ final class SessionCheck {
                     continue;
                 }
                 String[] partes = linha.split("\t", -1);
-                if (partes.length != 3) {
+                if (partes.length != 4) {
                     throw new IllegalStateException("linha invalida do leitor de cookies");
                 }
                 long expira;
@@ -213,7 +236,7 @@ final class SessionCheck {
                 } catch (NumberFormatException e) {
                     throw new IllegalStateException("expiracao invalida do leitor de cookies");
                 }
-                cookies.add(new Cookie(partes[0], partes[1], expira));
+                cookies.add(new Cookie(partes[0], partes[1], expira, partes[3]));
             }
             cookies.sort(Comparator.comparing(Cookie::host).thenComparing(Cookie::name));
             return List.copyOf(cookies);

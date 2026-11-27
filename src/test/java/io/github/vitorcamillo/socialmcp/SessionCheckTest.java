@@ -81,6 +81,27 @@ class SessionCheckTest {
     }
 
     @Test
+    void cifraDoChaveiroPedeRelogin() throws Exception {
+        perfilComCookies("facebook");
+        SessionCheck.leitor = arquivo -> List.of(
+                new SessionCheck.Cookie(".facebook.com", "c_user", micros(LocalDate.of(2027, 11, 26)), "v11"),
+                new SessionCheck.Cookie(".facebook.com", "xs", micros(LocalDate.of(2028, 5, 1)), "v10"));
+        assertEquals("facebook    deslogado para o MCP (cookies cifrados pelo chaveiro: relogue com --cli login facebook)",
+                SessionCheck.verificar(store, "facebook"));
+    }
+
+    @Test
+    void estadoSemPrefixo() throws Exception {
+        perfilComCookies("facebook");
+        SessionCheck.leitor = arquivo -> List.of(
+                cookie(".facebook.com", "c_user", LocalDate.of(2027, 11, 26)),
+                cookie(".facebook.com", "xs", LocalDate.of(2028, 5, 1)));
+        String comPrefixo = SessionCheck.verificar(store, "facebook");
+        assertEquals("facebook    logado (valido ate 2027-11-26)", comPrefixo);
+        assertEquals(comPrefixo.substring("facebook    ".length()), SessionCheck.estado(store, "facebook"));
+    }
+
+    @Test
     void cookiesDeSessaoLogadoSemData() throws Exception {
         perfilComCookies("instagram");
         SessionCheck.leitor = arquivo -> List.of(
@@ -249,9 +270,9 @@ class SessionCheckTest {
         Path banco = dir.resolve("Cookies");
         String criacao = "import sqlite3, sys\n"
                 + "con = sqlite3.connect(sys.argv[1])\n"
-                + "con.execute(\"create table cookies(host_key text, name text, expires_utc integer, value text)\")\n"
-                + "con.execute(\"insert into cookies values(?,?,?,?)\","
-                + " ('.facebook.com', 'c_user', 13400000000000000, 'SEGREDO123'))\n"
+                + "con.execute(\"create table cookies(host_key text, name text, expires_utc integer, value text, encrypted_value blob)\")\n"
+                + "con.execute(\"insert into cookies values(?,?,?,?,?)\","
+                + " ('.facebook.com', 'c_user', 13400000000000000, 'SEGREDO123', b\"v11\" + b\"SEGREDO123\"))\n"
                 + "con.commit()\n"
                 + "con.close()\n";
         Process criador = new ProcessBuilder("python3", "-I", "-c", criacao, banco.toString()).start();
@@ -266,10 +287,12 @@ class SessionCheckTest {
         assertEquals(".facebook.com", lidos.get(0).host());
         assertEquals("c_user", lidos.get(0).name());
         assertEquals(13400000000000000L, lidos.get(0).expiresUtc());
+        assertEquals("v11", lidos.get(0).cifra());
         for (SessionCheck.Cookie c : lidos) {
             assertFalse(c.host().contains("SEGREDO123"));
             assertFalse(c.name().contains("SEGREDO123"));
             assertFalse(Long.toString(c.expiresUtc()).contains("SEGREDO123"));
+            assertFalse(c.cifra().contains("SEGREDO123"));
         }
         assertEquals(antes, depois, "diretorio temporario de copia deve ser apagado");
     }
