@@ -78,6 +78,14 @@ class ToolsChromeLoteTest {
             <html><body><input type="file" id="file"><button id="enviar">enviar</button></body></html>
             """;
 
+    private static final String SHADOW_UPLOAD = """
+            <html><body><div id="host"></div><button id="enviar">enviar</button>
+            <script>
+            const root = document.querySelector('#host').attachShadow({mode: 'open'});
+            root.innerHTML = '<input type="file" id="file">';
+            </script></body></html>
+            """;
+
     @TempDir
     static Path tmp;
 
@@ -100,6 +108,7 @@ class ToolsChromeLoteTest {
         cf.pagina("/redir", REDIR);
         cf.pagina("/overlay", OVERLAY);
         cf.pagina("/upload", UPLOAD);
+        cf.pagina("/shadow-upload", SHADOW_UPLOAD);
         cf.pagina("/item/2", "<html><body><h1>post</h1></body></html>");
         cf.resposta("/api/ok", 200, "application/json; charset=utf-8", "ok");
         cf.resposta("/api/limit", 200, "application/json; charset=utf-8", "rate limit");
@@ -477,6 +486,21 @@ class ToolsChromeLoteTest {
         assertEquals(30, passo.path("bytes").asLong(-1));
         assertEquals(2, passo.path("arquivos").asInt(-1));
         assertEquals("a.png, b.png", passo.path("arquivo").asText());
+    }
+
+    @Test
+    @Order(22)
+    @Timeout(60)
+    void setFileEmShadowDomAbertoUsaBackendNodeId() throws Exception {
+        String path = tmp.resolve("upload/a.png").toString();
+        String id = preparar("""
+                [{"network":"bluesky","kind":"goto","url":"https://bsky.app/shadow-upload","description":"abrir"},
+                 {"network":"bluesky","kind":"set_file","selector":"css:#host >>> input[type=file]","path":%s,"description":"anexar"},
+                 {"network":"bluesky","kind":"click","selector":"css:#enviar","description":"enviar"}]
+                """.formatted(txt(path)), true);
+        JsonNode r = executar(id);
+        assertFalse(r.path("abortado").asBoolean(true), r.toString());
+        assertEquals("arquivo definido: a.png (10)", r.path("passos").get(1).path("info").asText());
     }
 
     // ---------- runStep: navegacao ----------

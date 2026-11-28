@@ -29,9 +29,13 @@ class ProbeTest {
     @Test
     void probePulaSoAcaoOpcional() {
         assertTrue(Tools.probePulaOpcional(Json.obj().put("kind", "click").put("ifPresent", true)));
+        assertTrue(Tools.probePulaOpcional(Json.obj().put("kind", "type").put("ifPresent", true)));
         assertFalse(Tools.probePulaOpcional(Json.obj().put("kind", "click")));
         assertFalse(Tools.probePulaOpcional(Json.obj().put("kind", "click").put("ifPresent", false)));
         assertFalse(Tools.probePulaOpcional(Json.obj().put("kind", "wait").put("ifPresent", true)));
+        for (String kind : List.of("key", "set_file", "request", "screenshot", "extract")) {
+            assertFalse(Tools.probePulaOpcional(Json.obj().put("kind", kind).put("ifPresent", true)), kind);
+        }
     }
 
     @Test

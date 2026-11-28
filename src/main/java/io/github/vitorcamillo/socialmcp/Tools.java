@@ -504,7 +504,8 @@ public class Tools {
 
     /** Passo de acao com ifPresent (ex.: descartar rascunho que so as vezes existe) nao e o primeiro controle. */
     static boolean probePulaOpcional(JsonNode a) {
-        return !probeExecuta(a.path("kind").asText("")) && a.path("ifPresent").asBoolean(false);
+        String kind = a.path("kind").asText("");
+        return ("click".equals(kind) || "type".equals(kind)) && a.path("ifPresent").asBoolean(false);
     }
 
     /**
