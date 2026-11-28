@@ -27,6 +27,14 @@ class ProbeTest {
     }
 
     @Test
+    void probePulaSoAcaoOpcional() {
+        assertTrue(Tools.probePulaOpcional(Json.obj().put("kind", "click").put("ifPresent", true)));
+        assertFalse(Tools.probePulaOpcional(Json.obj().put("kind", "click")));
+        assertFalse(Tools.probePulaOpcional(Json.obj().put("kind", "click").put("ifPresent", false)));
+        assertFalse(Tools.probePulaOpcional(Json.obj().put("kind", "wait").put("ifPresent", true)));
+    }
+
+    @Test
     void definitionsExpoeSocialProbeComRequiredNetworkEAction() {
         Store s = new Store(tmp.resolve("home" + System.nanoTime()));
         JsonNode defs = new Tools(s).definitions();

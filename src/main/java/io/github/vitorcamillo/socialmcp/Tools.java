@@ -502,6 +502,11 @@ public class Tools {
                 || "verify_attr".equals(kind) || "capture_ids".equals(kind);
     }
 
+    /** Passo de acao com ifPresent (ex.: descartar rascunho que so as vezes existe) nao e o primeiro controle. */
+    static boolean probePulaOpcional(JsonNode a) {
+        return !probeExecuta(a.path("kind").asText("")) && a.path("ifPresent").asBoolean(false);
+    }
+
     /**
      * social_probe: sonda de receita (so leitura). Executa os passos de leitura do inicio da
      * acao e confere se o primeiro controle de acao ainda existe na pagina, sem clicar,
@@ -542,6 +547,10 @@ public class Tools {
                 int n = 1;
                 for (JsonNode a : plan.steps()) {
                     String kind = a.path("kind").asText("");
+                    if (probePulaOpcional(a)) {
+                        n++;
+                        continue;
+                    }
                     if (!probeExecuta(kind)) {
                         primeiroControle = Json.obj();
                         primeiroSelector = a.path("selector").asText("");
@@ -1777,7 +1786,13 @@ public class Tools {
             bytes += Files.size(real);
         }
         WebElement input = el(d, a.path("selector").asText());
-        input.setFiles(arquivos.stream().map(java.nio.file.Path::toString).toList())
+        // backendNodeId, nao nodeId (WebElement.setFiles da lib): no dentro de shadow DOM (input de
+        // upload do Reddit) nao tem nodeId e o Chrome recusa DOM.setFileInputFiles (-32000).
+        int backend = input.getBackendNodeId().get(SET_FILE_TIMEOUT_S, java.util.concurrent.TimeUnit.SECONDS);
+        java.util.Map<String, Object> args = new java.util.HashMap<>();
+        args.put("backendNodeId", backend);
+        args.put("files", arquivos.stream().map(java.nio.file.Path::toString).toList());
+        input.getTarget().executeCdpCmd("DOM.setFileInputFiles", args, null)
                 .get(SET_FILE_TIMEOUT_S, java.util.concurrent.TimeUnit.SECONDS);
         d.sleep(1.0);
         String nome = String.join(", ", nomes);
