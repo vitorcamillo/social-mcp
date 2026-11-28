@@ -406,4 +406,41 @@ class EngajamentoLeveTest {
         assertEquals(bytes.length, java.nio.file.Files.size(j));
         assertEquals(0, store.usageFor("bluesky").engagementActions);
     }
+
+    @Test
+    void leRegistroFinalSemQuebraEAppendPosteriorSemDuplicar() throws Exception {
+        Store store = novoStore();
+        comEngagement(store, "bluesky", 30, 0);
+        String registro = Json.write(Json.obj().put("ts", System.currentTimeMillis())
+                .put("day", store.today()).put("type", "action").put("network", "bluesky")
+                .put("cls", "engagement").put("batchId", "sem-quebra"));
+        Files.writeString(store.journalPath(), registro, StandardCharsets.UTF_8);
+
+        assertEquals(1, store.usageFor("bluesky").engagementActions);
+        Files.writeString(store.journalPath(), "\n", StandardCharsets.UTF_8,
+                java.nio.file.StandardOpenOption.APPEND);
+        assertEquals(1, store.usageFor("bluesky").engagementActions);
+        store.appendJournal("action", "bluesky", Json.obj().put("cls", "engagement")
+                .put("batchId", "apos-append"));
+        assertEquals(2, store.usageFor("bluesky").engagementActions);
+        assertEquals(2, store.usageFor("bluesky").engagementActions);
+    }
+
+    @Test
+    void interpretaEscapesUnicodeNosCamposDoJournal() throws Exception {
+        Store store = novoStore();
+        String day = store.today();
+        Files.writeString(store.journalPath(),
+                "{\"ts\":1,\"day\":\"" + day + "\",\"type\":\"action\",\"network\":\"bluesky\","
+                        + "\"cls\":\"engag\\u0065ment\",\"batchId\":\"unicode\"}\n"
+                        + "{\"day\":\"" + day + "\",\"type\":\"engagement_batch\",\"network\":\"bluesky\","
+                        + "\"batchId\":\"unicode-lote\"}\n"
+                        + "{\"day\":\"" + day + "\",\"type\":\"\\u0062atch_executed\","
+                        + "\"network\":\"bluesky\",\"batchId\":\"unicode-lote\"}\n",
+                StandardCharsets.UTF_8);
+
+        Store.Usage usage = store.usageFor("bluesky");
+        assertEquals(1, usage.engagementActions);
+        assertEquals(0, usage.batches);
+    }
 }

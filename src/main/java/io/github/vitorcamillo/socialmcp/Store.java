@@ -426,11 +426,9 @@ public class Store {
             texto = engPendente + acumulado.toString(StandardCharsets.UTF_8);
         }
         engPendente = "";
-        int corte = Math.max(texto.lastIndexOf('\n'), texto.lastIndexOf('\r'));
-        String completo = corte < 0 ? "" : texto.substring(0, corte + 1);
-        engPendente = corte < 0 ? texto : texto.substring(corte + 1);
-        for (String linha : completo.split("[\r\n]+")) {
-            if (!linha.contains("engagement") && !linha.contains("\"batch_executed\"")) continue;
+        for (String linha : texto.split("[\r\n]+")) {
+            if (!linha.contains("\\u")
+                    && !linha.contains("engagement") && !linha.contains("\"batch_executed\"")) continue;
             try {
                 agregarEngajamento(Json.parse(linha));
             } catch (RuntimeException e) {
